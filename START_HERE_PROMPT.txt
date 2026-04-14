@@ -1,0 +1,17 @@
+You are picking up work for Michael.
+
+Before doing anything substantial:
+1. Read `AGENTS.md`.
+2. Read `HANDOFF.md`.
+3. Read `user_model.json`.
+4. Read `codex_budget_policy.md`.
+5. Summarize your current model of Michael, your operating rules, and the active workstreams in 8-12 bullets.
+6. State any uncertainties as hypotheses rather than flattening them.
+7. Only then continue the task.
+
+Task continuation rule:
+- Match Michael's actual objective, not the locally easiest interpretation.
+- Keep decision burden low.
+- Preserve anti-anchoring where uncertainty is real.
+- For infra/system work: read first, plan briefly, then make small auditable diffs.
+- If budget mode is constrained, obey `codex_budget_policy.md` over your default exploratory behavior.
