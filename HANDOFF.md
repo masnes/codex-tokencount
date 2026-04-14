@@ -43,14 +43,16 @@ Michael is exploring how to make Codex self-limit based on remaining quota so it
 Current best synthesis:
 - Do NOT rely on Codex to introspect quota inside the live session and self-regulate from vibes.
 - Instead, use an external governor/wrapper as source of truth.
+- If `/status` is available, ingest it; otherwise derive live budget state from `/codex-home/state_5.sqlite` plus the active rollout JSONL `token_count` events.
 - Feed a compact budget state back into Codex on each turn.
 - Change allowed behavior by mode (`normal`, `constrained`, `emergency`).
+- Reserve a separate agent slice by default, roughly 10% of the estimated five-hour allowance, for autonomous runs.
 - Prefer `gpt-5.4-mini` for exploratory, bounded, or cheap tasks; escalate only when quality genuinely matters.
 - Token control comes more from context discipline and bounded loops than from a pretty meter.
 
 Recommended implementation shape:
-- Wrapper reads `/status` externally.
-- Wrapper tracks per-turn usage from `codex exec --json` logs.
+- Wrapper reads `/status` externally when possible, otherwise uses the local session telemetry files.
+- Wrapper tracks per-turn usage from `codex exec --json` logs and the rollout JSONL stream.
 - Wrapper injects budget state into Codex via prompt or hooks.
 - Hook / wrapper enforces behavior changes: no subagents, no broad scans, no giant context ingestion in constrained mode.
 

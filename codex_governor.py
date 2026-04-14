@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -14,6 +15,9 @@ VALID_CONFIDENCE = {"high", "medium", "low"}
 VALID_TASK_KINDS = {"analysis", "edit", "search", "test", "summary", "plan", "unknown"}
 VALID_RISKS = {"low", "medium", "high"}
 SOURCE_SUFFIXES = (".json", ".jsonl", ".ndjson", ".log")
+DEFAULT_STATE_DB = Path("/codex-home/state_5.sqlite")
+LIVE_MODE_CONSTRAINED_USED_FRACTION = 0.80
+LIVE_MODE_EMERGENCY_USED_FRACTION = 0.95
 
 
 def _utc_now() -> str:
@@ -111,6 +115,248 @@ def _file_mtime(path: Path) -> datetime | None:
         return None
 
 
+def _epoch_seconds_to_iso(value: Any) -> str | None:
+    number = _coerce_number(value)
+    if number is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(number), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _estimate_limit_from_usage(used_tokens: Any, used_percent: Any) -> int | None:
+    used = _coerce_number(used_tokens)
+    percent = _coerce_number(used_percent)
+    if used is None or percent is None or percent <= 0:
+        return None
+    estimate = float(used) / (float(percent) / 100.0)
+    if estimate <= 0:
+        return None
+    return max(int(round(estimate)), 1)
+
+
+def _budget_fraction_used(budget: Any) -> float | None:
+    if not isinstance(budget, dict):
+        return None
+    used = _coerce_number(budget.get("used"))
+    limit = _coerce_number(budget.get("limit"))
+    if used is None or limit is None or limit <= 0:
+        return None
+    return float(used) / float(limit)
+
+
+def _highest_budget_fraction_used(budgets: Any) -> float | None:
+    if not isinstance(budgets, dict):
+        return None
+    fractions = [fraction for fraction in (_budget_fraction_used(budget) for budget in budgets.values()) if fraction is not None]
+    if not fractions:
+        return None
+    return max(fractions)
+
+
+def _read_sqlite_row(path: Path, query: str, params: Sequence[Any] = ()) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(query, params).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+
+
+def _discover_session_rollout_file(env: Mapping[str, str] | None = None) -> Path | None:
+    env_map = dict(os.environ if env is None else env)
+    explicit = _source_list_from_env(env_map, ["CODEX_ROLLOUT_FILE", "CODEX_ROLLOUT_PATH"])
+    if explicit:
+        candidate = Path(explicit[0])
+        return candidate if candidate.exists() else None
+
+    state_db_value = env_map.get("CODEX_STATE_DB")
+    state_db = Path(state_db_value) if state_db_value else DEFAULT_STATE_DB
+    if not state_db.exists():
+        return None
+
+    thread_row = _read_sqlite_row(
+        state_db,
+        "select rollout_path from threads where archived = 0 order by updated_at desc, created_at desc limit 1",
+    )
+    if not thread_row:
+        return None
+
+    rollout_path_value = _coerce_str(thread_row.get("rollout_path"))
+    if rollout_path_value is None:
+        return None
+    rollout_path = Path(rollout_path_value)
+    if not rollout_path.is_absolute():
+        rollout_path = state_db.parent / rollout_path
+    return rollout_path if rollout_path.exists() else None
+
+
+def _normalize_token_count_record(record: Any) -> dict[str, Any] | None:
+    if not isinstance(record, dict):
+        return None
+    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    record_type = _coerce_str(record.get("type"))
+    if record_type == "token_count":
+        normalized_payload = record
+    elif record_type == "event_msg" and _coerce_str(payload.get("type")) == "token_count":
+        normalized_payload = payload
+    else:
+        return None
+
+    return {
+        "capturedAt": _coerce_str(record.get("timestamp")) or _coerce_str(normalized_payload.get("capturedAt")),
+        "payload": normalized_payload,
+        "raw": record,
+    }
+
+
+def _token_count_records(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    token_records: list[dict[str, Any]] = []
+    for record in records:
+        normalized = _normalize_token_count_record(record)
+        if normalized is not None:
+            token_records.append(normalized)
+    return token_records
+
+
+def _build_rollout_usage_snapshot(
+    records: Sequence[dict[str, Any]],
+    *,
+    source_files: Sequence[str],
+    fallback_window: Any = None,
+    fallback_captured_at: str | None = None,
+    thread_row: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    token_records = _token_count_records(records)
+    if not token_records:
+        return None
+
+    latest = token_records[-1]
+    payload = latest["payload"]
+    info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+    rate_limits = payload.get("rate_limits") if isinstance(payload.get("rate_limits"), dict) else {}
+    total_usage = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else {}
+    last_usage = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
+    primary = rate_limits.get("primary") if isinstance(rate_limits.get("primary"), dict) else {}
+    secondary = rate_limits.get("secondary") if isinstance(rate_limits.get("secondary"), dict) else {}
+
+    total_tokens = _coerce_number(total_usage.get("total_tokens"))
+    if total_tokens is None:
+        total_tokens = _coerce_number(last_usage.get("total_tokens"))
+    if total_tokens is None and thread_row is not None:
+        total_tokens = _coerce_number(thread_row.get("tokens_used"))
+
+    primary_used_percent = _coerce_number(primary.get("used_percent"))
+    estimated_limit = _estimate_limit_from_usage(total_tokens, primary_used_percent)
+    if estimated_limit is None and thread_row is not None:
+        estimated_limit = _estimate_limit_from_usage(thread_row.get("tokens_used"), primary_used_percent)
+
+    weekly_used_percent = _coerce_number(secondary.get("used_percent"))
+    latest_captured_at = latest["capturedAt"] or fallback_captured_at or _utc_now()
+    earliest_captured_at = _earliest_timestamp(records)
+    window = _normalize_window(
+        fallback_window if fallback_window is not None else {"kind": "session", "startAt": _iso_from_datetime(earliest_captured_at) or latest_captured_at},
+        fallback_start=_iso_from_datetime(earliest_captured_at) or latest_captured_at,
+    )
+
+    budgets: dict[str, dict[str, Any]] = {}
+    if total_tokens is not None:
+        budget: dict[str, Any] = {"key": "five_hour_window", "unit": "tokens", "used": total_tokens}
+        if estimated_limit is not None:
+            budget["limit"] = estimated_limit
+            budget["remaining"] = int(max(estimated_limit - float(total_tokens), 0))
+        reset_at = _epoch_seconds_to_iso(primary.get("resets_at"))
+        if reset_at is not None:
+            budget["resetAt"] = reset_at
+        budgets["five_hour_window"] = budget
+
+        if thread_row is not None:
+            session_budget: dict[str, Any] = {
+                "key": "session_tokens",
+                "unit": "tokens",
+                "used": _coerce_number(thread_row.get("tokens_used")) or total_tokens,
+            }
+            if estimated_limit is not None:
+                session_budget["limit"] = estimated_limit
+                session_budget["remaining"] = int(max(estimated_limit - float(session_budget["used"]), 0))
+            if reset_at is not None:
+                session_budget["resetAt"] = reset_at
+            budgets["session_tokens"] = session_budget
+
+    if weekly_used_percent is not None:
+        budget = {"key": "weekly_window", "unit": "percent", "used": weekly_used_percent, "limit": 100}
+        budget["remaining"] = int(max(100 - float(weekly_used_percent), 0))
+        reset_at = _epoch_seconds_to_iso(secondary.get("resets_at"))
+        if reset_at is not None:
+            budget["resetAt"] = reset_at
+        budgets["weekly_window"] = budget
+
+    warnings: list[str] = []
+    if estimated_limit is None:
+        warnings.append("five-hour allowance could not be estimated from token_count telemetry")
+
+    snapshot: dict[str, Any] = {
+        "provider": "codex-rollout",
+        "capturedAt": latest_captured_at,
+        "state": "ok" if total_tokens is not None else "degraded",
+        "confidence": "high" if estimated_limit is not None else "medium",
+        "warnings": warnings,
+        "budgets": budgets,
+        "window": window,
+        "estimatesOnly": True,
+        "sourceFiles": _unique_strings(source_files),
+        "turnCount": len(token_records),
+        "eventCount": len(records),
+        "raw": latest["raw"],
+    }
+    return snapshot
+
+
+def _mode_from_usage_budgets(usage: dict[str, Any]) -> str | None:
+    fraction = _highest_budget_fraction_used(usage.get("budgets"))
+    if fraction is None:
+        return None
+    if fraction >= LIVE_MODE_EMERGENCY_USED_FRACTION:
+        return "emergency"
+    if fraction >= LIVE_MODE_CONSTRAINED_USED_FRACTION:
+        return "constrained"
+    return "normal"
+
+
+def _status_from_usage_snapshot(usage: dict[str, Any]) -> dict[str, Any]:
+    mode = _mode_from_usage_budgets(usage)
+    if mode is None:
+        return normalize_status_snapshot(None, fallback_captured_at=usage.get("capturedAt"))
+
+    warnings = _unique_strings(["derived from local session telemetry"] + _coerce_string_list(usage.get("warnings")))
+    snapshot: dict[str, Any] = {
+        "provider": "codex-session",
+        "capturedAt": usage.get("capturedAt") or _utc_now(),
+        "state": "ok" if usage.get("state") == "ok" else "degraded",
+        "confidence": "high" if usage.get("state") == "ok" else "medium",
+        "mode": mode,
+        "budgets": usage.get("budgets") or {},
+        "warnings": warnings,
+        "raw": usage.get("raw"),
+    }
+    primary_budget = (usage.get("budgets") or {}).get("five_hour_window")
+    reset_at = _coerce_str(primary_budget.get("resetAt")) if isinstance(primary_budget, dict) else None
+    if reset_at is not None:
+        snapshot["resetAt"] = reset_at
+    return normalize_status_snapshot(snapshot, fallback_captured_at=usage.get("capturedAt"))
+
+
 def _normalize_window(window: Any, fallback_start: str | None = None) -> dict[str, Any]:
     if not isinstance(window, dict):
         return {"kind": "session", "startAt": fallback_start or _utc_now()}
@@ -129,11 +375,12 @@ def _normalize_budget_entry(key: str, value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return {"unit": str(key), "used": value}
+        return {"key": str(key), "unit": str(key), "used": value}
     if not isinstance(value, dict):
         return None
-    unit = _coerce_str(value.get("unit")) or str(key)
-    normalized: dict[str, Any] = {"unit": unit}
+    budget_key = _coerce_str(value.get("key")) or _coerce_str(value.get("name")) or str(key)
+    unit = _coerce_str(value.get("unit")) or budget_key
+    normalized: dict[str, Any] = {"key": budget_key, "unit": unit}
     for field in ("used", "remaining", "limit"):
         number = _coerce_number(value.get(field))
         if number is not None:
@@ -162,7 +409,7 @@ def _normalize_budget_map(raw: Any) -> dict[str, dict[str, Any]]:
     for key, value in items:
         budget = _normalize_budget_entry(str(key), value)
         if budget is not None:
-            result[budget["unit"]] = budget
+            result[budget.get("key") or budget["unit"]] = budget
     return result
 
 
@@ -640,6 +887,8 @@ class FileStatusProvider:
 class JsonlUsageProvider:
     def __init__(self, sources: str | Path | Sequence[str | Path] | None = None, *, env: Mapping[str, str] | None = None):
         self._env = dict(os.environ if env is None else env)
+        self._explicit_sources_supplied = sources is not None
+        self._explicit_rollout_env = bool(_source_list_from_env(self._env, ["CODEX_ROLLOUT_FILE", "CODEX_ROLLOUT_PATH"]))
         self._source_specs = self._resolve_source_specs(sources)
 
     def getUsage(self, window: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -663,6 +912,25 @@ class JsonlUsageProvider:
             )
             snapshot["warnings"] = _unique_strings(snapshot["warnings"] + warnings)
             return snapshot
+
+        rollout_snapshot = _build_rollout_usage_snapshot(
+            records,
+            source_files=[str(path) for path in files],
+            fallback_window=window,
+            fallback_captured_at=_iso_from_datetime(_latest_timestamp(records, fallback_path=files[-1])),
+            thread_row=self._load_thread_row(),
+        )
+        if rollout_snapshot is not None:
+            if warnings:
+                rollout_snapshot["warnings"] = _unique_strings(rollout_snapshot["warnings"] + warnings)
+                if rollout_snapshot["confidence"] == "high":
+                    rollout_snapshot["confidence"] = "medium"
+            return normalize_usage_snapshot(
+                rollout_snapshot,
+                source_files=rollout_snapshot.get("sourceFiles"),
+                fallback_window=window,
+                fallback_captured_at=rollout_snapshot.get("capturedAt"),
+            )
 
         payload = _latest_mapping(records)
         latest_timestamp = _latest_timestamp(records, fallback_path=files[-1])
@@ -691,11 +959,17 @@ class JsonlUsageProvider:
 
     def _resolve_source_specs(self, sources: str | Path | Sequence[str | Path] | None) -> list[Path]:
         if sources is None:
-            env_sources = _source_list_from_env(
+            explicit_sources = _source_list_from_env(
                 self._env,
-                ["CODEX_USAGE_FILES", "CODEX_USAGE_FILE", "CODEX_USAGE_DIR", "CODEX_OUT"],
+                ["CODEX_USAGE_FILES", "CODEX_USAGE_FILE", "CODEX_USAGE_DIR"],
             )
-            return [Path(item) for item in env_sources]
+            if explicit_sources:
+                return [Path(item) for item in explicit_sources]
+            session_rollout = _discover_session_rollout_file(self._env)
+            if session_rollout is not None:
+                return [session_rollout]
+            out_sources = _source_list_from_env(self._env, ["CODEX_OUT"])
+            return [Path(item) for item in out_sources]
         if isinstance(sources, (str, Path)):
             return [Path(sources)]
         return [Path(item) for item in sources]
@@ -706,6 +980,37 @@ class JsonlUsageProvider:
             files.extend(_expand_usage_source(spec))
         existing = [path for path in files if path.exists() and path.is_file()]
         return _unique_paths(existing)
+
+    def _load_thread_row(self) -> dict[str, Any] | None:
+        if self._explicit_sources_supplied or self._explicit_rollout_env:
+            return None
+        session_rollout = _discover_session_rollout_file(self._env)
+        if session_rollout is None or session_rollout not in self._source_specs:
+            return None
+        state_db_value = self._env.get("CODEX_STATE_DB")
+        state_db = Path(state_db_value) if state_db_value else DEFAULT_STATE_DB
+        return _read_sqlite_row(
+            state_db,
+            "select id, rollout_path, created_at, updated_at, tokens_used from threads where archived = 0 order by updated_at desc, created_at desc limit 1",
+        )
+
+
+class SessionStatusProvider:
+    def __init__(
+        self,
+        usage_provider: JsonlUsageProvider | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
+    ):
+        self._env = dict(os.environ if env is None else env)
+        self._usage_provider = usage_provider or JsonlUsageProvider(env=self._env)
+
+    def getStatus(self) -> dict[str, Any]:
+        usage = self._usage_provider.getUsage()
+        return _status_from_usage_snapshot(usage)
+
+    def get_status(self) -> dict[str, Any]:
+        return self.getStatus()
 
 
 class PolicyEngine:
@@ -763,6 +1068,12 @@ class PolicyEngine:
         return "emergency", "usage_fallback"
 
     def _demote_for_usage(self, mode: str, usage: dict[str, Any]) -> str:
+        pressure = _highest_budget_fraction_used(usage.get("budgets"))
+        if pressure is not None:
+            if pressure >= LIVE_MODE_EMERGENCY_USED_FRACTION:
+                return "emergency"
+            if pressure >= LIVE_MODE_CONSTRAINED_USED_FRACTION and mode == "normal":
+                return "constrained"
         if usage.get("state") in {"stale", "degraded"}:
             return _mode_step_down(mode)
         if usage.get("confidence") == "low" and mode != "emergency":
@@ -918,9 +1229,10 @@ class CodexGovernor:
     @classmethod
     def from_environment(cls, env: Mapping[str, str] | None = None) -> "CodexGovernor":
         env_map = dict(os.environ if env is None else env)
+        usage_provider = build_usage_provider(env_map)
         return cls(
-            status_provider=FileStatusProvider(env=env_map),
-            usage_provider=JsonlUsageProvider(env=env_map),
+            status_provider=build_status_provider(env=env_map, usage_provider=usage_provider),
+            usage_provider=usage_provider,
             policy_engine=PolicyEngine(),
         )
 
@@ -938,12 +1250,46 @@ class CodexGovernor:
     def resolve(self, context: dict[str, Any], window: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.evaluate(context, window)
 
+    def plan_autonomous_budget(self, percent: int = 10, window: dict[str, Any] | None = None) -> dict[str, Any]:
+        usage = self.usage_provider.getUsage(window)
+        primary_budget = (usage.get("budgets") or {}).get("five_hour_window")
+        weekly_budget = (usage.get("budgets") or {}).get("weekly_window")
+        estimated_limit = _coerce_number(primary_budget.get("limit")) if isinstance(primary_budget, dict) else None
+        slice_limit = None
+        if estimated_limit is not None:
+            slice_limit = max(int(round(float(estimated_limit) * (float(percent) / 100.0))), 1)
+        return {
+            "slicePercent": percent,
+            "estimatedFiveHourLimitTokens": estimated_limit,
+            "sliceLimitTokens": slice_limit,
+            "fiveHourResetAt": primary_budget.get("resetAt") if isinstance(primary_budget, dict) else None,
+            "weeklyResetAt": weekly_budget.get("resetAt") if isinstance(weekly_budget, dict) else None,
+            "sourceFiles": usage.get("sourceFiles", []),
+            "warnings": usage.get("warnings", []),
+        }
+
 
 BudgetGovernor = CodexGovernor
 
 
-def build_status_provider(env: Mapping[str, str] | None = None) -> FileStatusProvider:
-    return FileStatusProvider(env=env)
+def build_status_provider(
+    env: Mapping[str, str] | None = None,
+    *,
+    usage_provider: JsonlUsageProvider | None = None,
+) -> Any:
+    env_map = dict(os.environ if env is None else env)
+    explicit_sources = _source_list_from_env(
+        env_map,
+        ["CODEX_STATUS_FILES", "CODEX_STATUS_FILE", "CODEX_STATUS_PATH", "CODEX_STATUS_DIR"],
+    )
+    if explicit_sources:
+        return FileStatusProvider(env=env_map)
+
+    session_rollout = _discover_session_rollout_file(env_map)
+    if session_rollout is not None:
+        return SessionStatusProvider(usage_provider=usage_provider or JsonlUsageProvider(env=env_map), env=env_map)
+
+    return FileStatusProvider(env=env_map)
 
 
 def build_usage_provider(env: Mapping[str, str] | None = None) -> JsonlUsageProvider:
@@ -1153,6 +1499,7 @@ __all__ = [
     "CodexGovernor",
     "FileStatusProvider",
     "JsonlUsageProvider",
+    "SessionStatusProvider",
     "PolicyEngine",
     "StubPolicyEngine",
     "StubStatusProvider",

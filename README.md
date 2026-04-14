@@ -29,3 +29,4 @@ Design philosophy:
 - Small durable guidance in `AGENTS.md`.
 - Richer context kept in separate docs so token burn stays under control.
 - Treat all user-model content as strong priors, not immutable truth.
+- Live budget tracking now comes from the local session telemetry files: `state_5.sqlite` identifies the active thread and rollout JSONL carries `token_count` events.

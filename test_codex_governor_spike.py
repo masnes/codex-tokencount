@@ -5,7 +5,13 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from codex_governor import BudgetGovernor, FileStatusProvider, JsonlUsageProvider, PolicyEngine
+from codex_governor import (
+    BudgetGovernor,
+    FileStatusProvider,
+    JsonlUsageProvider,
+    PolicyEngine,
+    SessionStatusProvider,
+)
 from codex_governor_spike import StubPolicyEngine
 
 
@@ -50,6 +56,90 @@ def base_context(overrides: dict[str, object] | None = None) -> dict[str, object
     if overrides:
         context.update(overrides)
     return context
+
+
+def write_rollout(path: Path, *, used_percent: float, total_tokens: int, weekly_used_percent: float = 19.0) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-14T18:00:00Z",
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "thread-1",
+                            "timestamp": "2026-04-14T18:00:00Z",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-14T18:05:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": None,
+                            "rate_limits": {
+                                "limit_id": "codex",
+                                "primary": {
+                                    "used_percent": used_percent,
+                                    "window_minutes": 300,
+                                    "resets_at": 1776210379,
+                                },
+                                "secondary": {
+                                    "used_percent": weekly_used_percent,
+                                    "window_minutes": 10080,
+                                    "resets_at": 1776472912,
+                                },
+                                "plan_type": "plus",
+                            },
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-14T18:10:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": total_tokens - 120,
+                                    "cached_input_tokens": 32,
+                                    "output_tokens": 88,
+                                    "reasoning_output_tokens": 14,
+                                    "total_tokens": total_tokens,
+                                },
+                                "last_token_usage": {
+                                    "input_tokens": total_tokens - 120,
+                                    "cached_input_tokens": 32,
+                                    "output_tokens": 88,
+                                    "reasoning_output_tokens": 14,
+                                    "total_tokens": total_tokens,
+                                },
+                                "model_context_window": 258400,
+                            },
+                            "rate_limits": {
+                                "limit_id": "codex",
+                                "primary": {
+                                    "used_percent": used_percent,
+                                    "window_minutes": 300,
+                                    "resets_at": 1776210379,
+                                },
+                                "secondary": {
+                                    "used_percent": weekly_used_percent,
+                                    "window_minutes": 10080,
+                                    "resets_at": 1776472912,
+                                },
+                                "plan_type": "plus",
+                            },
+                        },
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 class CodexGovernorSpikeTest(unittest.TestCase):
@@ -252,6 +342,27 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             self.assertEqual(snapshot["sourceFiles"], [str(usage_path)])
             self.assertEqual(snapshot["budgets"]["tokens"]["used"], 15)
 
+    def test_usage_provider_parses_rollout_token_counts(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rollout_path = Path(tmpdir) / "rollout.jsonl"
+            write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
+            snapshot = JsonlUsageProvider(rollout_path).getUsage()
+            self.assertEqual(snapshot["state"], "ok")
+            self.assertEqual(snapshot["sourceFiles"], [str(rollout_path)])
+            self.assertEqual(snapshot["budgets"]["five_hour_window"]["used"], 4000)
+            self.assertEqual(snapshot["budgets"]["five_hour_window"]["limit"], 10000)
+            self.assertEqual(snapshot["budgets"]["weekly_window"]["used"], 19.0)
+            self.assertEqual(snapshot["budgets"]["weekly_window"]["limit"], 100)
+
+    def test_session_status_provider_uses_live_budget_mode(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rollout_path = Path(tmpdir) / "rollout.jsonl"
+            write_rollout(rollout_path, used_percent=88.0, total_tokens=8800)
+            status = SessionStatusProvider(JsonlUsageProvider(rollout_path)).getStatus()
+            self.assertEqual(status["state"], "ok")
+            self.assertEqual(status["mode"], "constrained")
+            self.assertIn("derived from local session telemetry", status["warnings"])
+
     def test_governor_from_environment_uses_configured_sources(self) -> None:
         with TemporaryDirectory() as tmpdir:
             status_path = Path(tmpdir) / "status.json"
@@ -296,6 +407,27 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             payload = json.loads(result["injection"])
             self.assertEqual(payload["mode"], "constrained")
             self.assertIn("summarize before editing", payload["directives"])
+
+    def test_governor_from_environment_uses_rollout_telemetry(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rollout_path = Path(tmpdir) / "rollout.jsonl"
+            write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
+            governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
+            result = governor.evaluate(base_context({"requestSummary": "use live rollout telemetry"}))
+            self.assertEqual(result["decision"]["mode"], "normal")
+            payload = json.loads(result["injection"])
+            self.assertEqual(payload["status"]["mode"], "normal")
+            self.assertIn("five_hour_window", payload["usage"]["budgets"])
+
+    def test_autonomous_budget_plan_uses_estimated_limit(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rollout_path = Path(tmpdir) / "rollout.jsonl"
+            write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
+            governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
+            plan = governor.plan_autonomous_budget(percent=10)
+            self.assertEqual(plan["estimatedFiveHourLimitTokens"], 10000)
+            self.assertEqual(plan["sliceLimitTokens"], 1000)
+            self.assertEqual(plan["fiveHourResetAt"], "2026-04-14T23:46:19Z")
 
 
 if __name__ == "__main__":

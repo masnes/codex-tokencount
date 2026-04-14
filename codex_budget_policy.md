@@ -7,8 +7,9 @@ Do not ask Codex to "be careful with tokens" in a vague way.
 Use an external governor and force specific behavior changes by budget mode.
 
 ## Source of truth
-- External wrapper / governor reads `codex /status`.
-- External wrapper also records actual per-turn burn from `codex exec --json`.
+- External wrapper / governor reads `codex /status` if available.
+- If `/status` is unavailable, use `/codex-home/state_5.sqlite` plus the active rollout JSONL `token_count` events as the live telemetry source.
+- External wrapper also records actual per-turn burn from `codex exec --json` or the rollout stream.
 - In-session status is advisory only.
 
 ## Budget modes
@@ -78,3 +79,4 @@ Policy: no subagents; no repo-wide scans; prefer targeted grep/read; use gpt-5.4
 - Richer docs stored separately and loaded only when needed.
 - Prefer bounded `codex exec` loops over open-ended sessions when cost control matters.
 - Escalate to larger model / more reasoning only when the expected value is clearly positive.
+- For autonomous agents, reserve a fixed slice of the estimated five-hour allowance and stop the child session at that slice limit.
