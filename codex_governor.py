@@ -357,6 +357,53 @@ def _status_from_usage_snapshot(usage: dict[str, Any]) -> dict[str, Any]:
     return normalize_status_snapshot(snapshot, fallback_captured_at=usage.get("capturedAt"))
 
 
+def _autonomous_budget_from_usage_snapshot(usage: dict[str, Any], percent: int = 10) -> dict[str, Any]:
+    usage = normalize_usage_snapshot(
+        usage,
+        source_files=usage.get("sourceFiles") if isinstance(usage, dict) else None,
+        fallback_window=usage.get("window") if isinstance(usage, dict) else None,
+        fallback_captured_at=usage.get("capturedAt") if isinstance(usage, dict) else None,
+    )
+
+    five_hour_budget = (usage.get("budgets") or {}).get("five_hour_window")
+    session_budget = (usage.get("budgets") or {}).get("session_tokens")
+    weekly_budget = (usage.get("budgets") or {}).get("weekly_window")
+    primary_budget = five_hour_budget or session_budget or {}
+    estimated_limit = _coerce_number(primary_budget.get("limit")) if isinstance(primary_budget, dict) else None
+    used_tokens = _coerce_number(primary_budget.get("used")) if isinstance(primary_budget, dict) else None
+    if estimated_limit is None and isinstance(five_hour_budget, dict) and used_tokens is not None:
+        estimated_limit = _coerce_number(five_hour_budget.get("limit"))
+    if estimated_limit is None and used_tokens is not None:
+        # Fall back to the raw telemetry if the normalized budget is missing a limit.
+        raw = usage.get("raw")
+        if isinstance(raw, dict):
+            payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            rate_limits = payload.get("rate_limits") if isinstance(payload.get("rate_limits"), dict) else {}
+            primary = rate_limits.get("primary") if isinstance(rate_limits.get("primary"), dict) else {}
+            estimate = _estimate_limit_from_usage(
+                info.get("total_token_usage", {}).get("total_tokens") if isinstance(info.get("total_token_usage"), dict) else used_tokens,
+                primary.get("used_percent"),
+            )
+            if estimate is not None:
+                estimated_limit = estimate
+
+    slice_limit = None
+    if estimated_limit is not None:
+        slice_limit = max(int(round(float(estimated_limit) * (float(percent) / 100.0))), 1)
+
+    result = {
+        "slicePercent": percent,
+        "estimatedFiveHourLimitTokens": estimated_limit,
+        "sliceLimitTokens": slice_limit,
+        "fiveHourResetAt": _coerce_str(five_hour_budget.get("resetAt")) if isinstance(five_hour_budget, dict) else None,
+        "weeklyResetAt": _coerce_str(weekly_budget.get("resetAt")) if isinstance(weekly_budget, dict) else None,
+        "sourceFiles": usage.get("sourceFiles", []),
+        "warnings": usage.get("warnings", []),
+    }
+    return strip_none(result)
+
+
 def _normalize_window(window: Any, fallback_start: str | None = None) -> dict[str, Any]:
     if not isinstance(window, dict):
         return {"kind": "session", "startAt": fallback_start or _utc_now()}
@@ -1012,6 +1059,12 @@ class SessionStatusProvider:
     def get_status(self) -> dict[str, Any]:
         return self.getStatus()
 
+    def getStatusFromUsage(self, usage: dict[str, Any]) -> dict[str, Any]:
+        return _status_from_usage_snapshot(usage)
+
+    def get_status_from_usage(self, usage: dict[str, Any]) -> dict[str, Any]:
+        return self.getStatusFromUsage(usage)
+
 
 class PolicyEngine:
     def evaluate(
@@ -1237,8 +1290,8 @@ class CodexGovernor:
         )
 
     def evaluate(self, context: dict[str, Any], window: dict[str, Any] | None = None) -> dict[str, Any]:
-        status = self.status_provider.getStatus()
         usage = self.usage_provider.getUsage(window)
+        status = self._status_from_usage_or_provider(usage)
         decision = self.policy_engine.evaluate(status, usage, context)
         return {
             "status": status,
@@ -1250,23 +1303,52 @@ class CodexGovernor:
     def resolve(self, context: dict[str, Any], window: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.evaluate(context, window)
 
-    def plan_autonomous_budget(self, percent: int = 10, window: dict[str, Any] | None = None) -> dict[str, Any]:
+    def evaluate_with_budget_plan(
+        self,
+        context: dict[str, Any],
+        *,
+        percent: int = 10,
+        window: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         usage = self.usage_provider.getUsage(window)
-        primary_budget = (usage.get("budgets") or {}).get("five_hour_window")
-        weekly_budget = (usage.get("budgets") or {}).get("weekly_window")
-        estimated_limit = _coerce_number(primary_budget.get("limit")) if isinstance(primary_budget, dict) else None
-        slice_limit = None
-        if estimated_limit is not None:
-            slice_limit = max(int(round(float(estimated_limit) * (float(percent) / 100.0))), 1)
+        status = self._status_from_usage_or_provider(usage)
+        decision = self.policy_engine.evaluate(status, usage, context)
+        autonomous_budget = _autonomous_budget_from_usage_snapshot(usage, percent=percent)
         return {
-            "slicePercent": percent,
-            "estimatedFiveHourLimitTokens": estimated_limit,
-            "sliceLimitTokens": slice_limit,
-            "fiveHourResetAt": primary_budget.get("resetAt") if isinstance(primary_budget, dict) else None,
-            "weeklyResetAt": weekly_budget.get("resetAt") if isinstance(weekly_budget, dict) else None,
-            "sourceFiles": usage.get("sourceFiles", []),
-            "warnings": usage.get("warnings", []),
+            "status": status,
+            "usage": usage,
+            "decision": decision,
+            "injection": self.policy_engine.renderInjection(decision),
+            "autonomousBudget": autonomous_budget,
         }
+
+    def resolve_with_budget_plan(
+        self,
+        context: dict[str, Any],
+        *,
+        percent: int = 10,
+        window: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self.evaluate_with_budget_plan(context, percent=percent, window=window)
+
+    def plan_autonomous_budget(
+        self,
+        percent: int = 10,
+        window: dict[str, Any] | None = None,
+        usage: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if usage is None:
+            usage = self.usage_provider.getUsage(window)
+        return _autonomous_budget_from_usage_snapshot(usage, percent=percent)
+
+    def _status_from_usage_or_provider(self, usage: dict[str, Any]) -> dict[str, Any]:
+        getter = getattr(self.status_provider, "getStatusFromUsage", None)
+        if callable(getter):
+            return getter(usage)
+        getter = getattr(self.status_provider, "get_status_from_usage", None)
+        if callable(getter):
+            return getter(usage)
+        return self.status_provider.getStatus()
 
 
 BudgetGovernor = CodexGovernor

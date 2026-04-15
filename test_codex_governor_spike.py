@@ -419,12 +419,39 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             self.assertEqual(payload["status"]["mode"], "normal")
             self.assertIn("five_hour_window", payload["usage"]["budgets"])
 
+    def test_resolve_with_budget_plan_reads_usage_once(self) -> None:
+        class CountingUsageProvider:
+            def __init__(self, snapshot: dict[str, object]):
+                self.snapshot = snapshot
+                self.calls = 0
+
+            def getUsage(self, window: dict[str, object] | None = None) -> dict[str, object]:
+                self.calls += 1
+                return self.snapshot
+
+        with TemporaryDirectory() as tmpdir:
+            rollout_path = Path(tmpdir) / "rollout.jsonl"
+            write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
+            usage_snapshot = JsonlUsageProvider(rollout_path).getUsage()
+            usage_provider = CountingUsageProvider(usage_snapshot)
+            governor = BudgetGovernor(
+                status_provider=SessionStatusProvider(usage_provider),
+                usage_provider=usage_provider,
+                policy_engine=PolicyEngine(),
+            )
+            result = governor.resolve_with_budget_plan(base_context({"requestSummary": "single read"}), percent=10)
+            self.assertEqual(usage_provider.calls, 1)
+            self.assertEqual(result["decision"]["mode"], "normal")
+            self.assertEqual(result["autonomousBudget"]["sliceLimitTokens"], 1000)
+            self.assertEqual(result["autonomousBudget"]["estimatedFiveHourLimitTokens"], 10000)
+
     def test_autonomous_budget_plan_uses_estimated_limit(self) -> None:
         with TemporaryDirectory() as tmpdir:
             rollout_path = Path(tmpdir) / "rollout.jsonl"
             write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
             governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
-            plan = governor.plan_autonomous_budget(percent=10)
+            usage = governor.usage_provider.getUsage()
+            plan = governor.plan_autonomous_budget(percent=10, usage=usage)
             self.assertEqual(plan["estimatedFiveHourLimitTokens"], 10000)
             self.assertEqual(plan["sliceLimitTokens"], 1000)
             self.assertEqual(plan["fiveHourResetAt"], "2026-04-14T23:46:19Z")
