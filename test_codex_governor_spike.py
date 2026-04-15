@@ -4,6 +4,7 @@ import os
 import io
 import json
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from codex_governor import (
     JsonlUsageProvider,
     PolicyEngine,
     SessionStatusProvider,
+    main,
 )
 from codex_governor_spike import StubPolicyEngine
 
@@ -488,6 +490,8 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
             governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
             launcher = BudgetedCodexLauncher(governor, snapshot_store=BudgetSnapshotStore(snapshot_path), process_factory=lambda *args, **kwargs: FakeProcess([]))
+            live_store = BudgetSnapshotStore(snapshot_path)
+            live_store.write({"snapshot": "live"})
 
             prepared = launcher.prepare(base_context({"requestSummary": "launch child"}), percent=9)
             command = launcher.build_command(prepared, "child task", workdir=Path(tmpdir), model="gpt-5.4-mini")
@@ -498,10 +502,85 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             self.assertIn("child task", command[-1])
             self.assertTrue(snapshot_path.exists())
             stored = json.loads(snapshot_path.read_text(encoding="utf-8"))
-            self.assertIn("autonomousBudget", stored)
-            self.assertEqual(stored["autonomousBudget"]["sliceLimitTokens"], 900)
-            self.assertEqual(stored["recursionPolicy"]["currentDepth"], 0)
-            self.assertFalse(stored["recursionPolicy"]["allowed"])
+            self.assertEqual(stored, {"snapshot": "live"})
+            staged_path = Path(prepared["stagedSnapshotPath"])
+            self.assertTrue(staged_path.exists())
+            staged = json.loads(staged_path.read_text(encoding="utf-8"))
+            self.assertIn("autonomousBudget", staged)
+            self.assertEqual(staged["autonomousBudget"]["sliceLimitTokens"], 900)
+            self.assertEqual(staged["recursionPolicy"]["currentDepth"], 0)
+            self.assertFalse(staged["recursionPolicy"]["allowed"])
+
+            launch_result = launcher.launch(
+                base_context({"requestSummary": "launch child"}),
+                "child task",
+                percent=9,
+                workdir=Path(tmpdir),
+                model="gpt-5.4-mini",
+                snapshot_path=snapshot_path,
+            )
+            self.assertTrue(launch_result["promotionApplied"])
+            promoted = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertIn("autonomousBudget", promoted)
+            self.assertEqual(promoted["autonomousBudget"]["sliceLimitTokens"], 900)
+
+    def test_budgeted_launcher_bootstraps_live_snapshot_when_missing(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rollout_path = Path(tmpdir) / "rollout.jsonl"
+            snapshot_path = Path(tmpdir) / "budget-snapshot.json"
+            write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
+            governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
+            launcher = BudgetedCodexLauncher(governor, snapshot_store=BudgetSnapshotStore(snapshot_path), process_factory=lambda *args, **kwargs: FakeProcess([]))
+
+            prepared = launcher.prepare(base_context({"requestSummary": "bootstrap live snapshot"}), percent=9)
+
+            self.assertTrue(snapshot_path.exists())
+            live = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertIn("autonomousBudget", live)
+            self.assertEqual(live["autonomousBudget"]["sliceLimitTokens"], 900)
+            self.assertEqual(live["snapshotPath"], str(snapshot_path))
+            self.assertTrue(Path(prepared["stagedSnapshotPath"]).exists())
+
+    def test_python_launcher_cli_defaults_snapshot_to_codex_out(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rollout_path = Path(tmpdir) / "rollout.jsonl"
+            out_dir = Path(tmpdir) / "worker-out"
+            write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
+            fake_process = FakeProcess([])
+
+            with patch.dict(
+                os.environ,
+                {
+                    "CODEX_OUT": str(out_dir),
+                    "CODEX_ROLLOUT_FILE": str(rollout_path),
+                },
+                clear=False,
+            ):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "launch",
+                            "child task",
+                            "--request-summary",
+                            "launch child worker",
+                            "--task-kind",
+                            "edit",
+                            "--write-intent",
+                            "--candidate-file",
+                            "a.py",
+                        ],
+                        process_factory=lambda *args, **kwargs: fake_process,
+                    )
+
+            self.assertEqual(exit_code, 0)
+            result = json.loads(stdout.getvalue())
+            expected_snapshot = out_dir / "budget-snapshot.json"
+            self.assertEqual(result["snapshotPath"], str(expected_snapshot))
+            self.assertEqual(result["autonomousBudget"]["sliceLimitTokens"], 900)
+            self.assertTrue(result["promotionApplied"])
+            self.assertTrue(Path(result["stagedSnapshotPath"]).exists())
+            self.assertTrue(expected_snapshot.exists())
 
     def test_budgeted_launcher_blocks_recursive_invocation(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -509,6 +588,7 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             snapshot_path = Path(tmpdir) / "budget-snapshot.json"
             write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
             governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
+            BudgetSnapshotStore(snapshot_path).write({"snapshot": "live"})
 
             called = False
 
@@ -540,8 +620,8 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             self.assertEqual(result["recursionPolicy"]["currentDepth"], 1)
             self.assertTrue(snapshot_path.exists())
             stored = json.loads(snapshot_path.read_text(encoding="utf-8"))
-            self.assertEqual(stored["recursionPolicy"]["currentDepth"], 1)
-            self.assertFalse(stored["recursionPolicy"]["allowed"])
+            self.assertEqual(stored, {"snapshot": "live"})
+            self.assertTrue(Path(result["stagedSnapshotPath"]).exists())
 
     def test_budgeted_launcher_stops_child_at_slice_limit(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -549,6 +629,7 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             snapshot_path = Path(tmpdir) / "budget-snapshot.json"
             write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
             governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
+            BudgetSnapshotStore(snapshot_path).write({"snapshot": "live"})
 
             child_lines = [
                 json.dumps(
@@ -606,7 +687,9 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             self.assertEqual(result["exitCode"], -15)
             self.assertTrue(snapshot_path.exists())
             refreshed = json.loads(snapshot_path.read_text(encoding="utf-8"))
-            self.assertIn("autonomousBudget", refreshed)
+            self.assertEqual(refreshed, {"snapshot": "live"})
+            self.assertFalse(result["promotionApplied"])
+            self.assertTrue(Path(result["stagedSnapshotPath"]).exists())
 
 
 if __name__ == "__main__":

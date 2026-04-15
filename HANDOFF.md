@@ -63,6 +63,7 @@ Michael wants strong containment against container escape and accidental damage 
 - He is less worried about the container being destroyed than about it affecting the host outside its allowed boundary.
 - He values explicit threat-model tradeoffs.
 - He wants practical, not theatrical, security.
+- The Podman shim lives in `tools/codex-box`; its operational notes are in `docs/codex-box.md` so the compatibility layer stays separate from the governor code.
 
 ### 3) Reading / story recommendation work
 Durable taste signals:

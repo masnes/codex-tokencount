@@ -8,6 +8,8 @@ What this package contains:
 - `user_model.json` — machine-readable form of the most useful durable context.
 - `START_HERE_PROMPT.txt` — a prompt you can paste into Codex to make it ingest this package before acting.
 - `codex_budget_policy.md` — practical self-limiting policy for quota-aware behavior.
+- `docs/codex-box.md` — separate operational note for the Podman shim.
+- `tools/codex-box` — the shim itself, kept out of the repo root on purpose.
 - `sources.md` — official docs and references used to shape the package.
 
 What this package does NOT contain:

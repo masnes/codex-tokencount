@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sqlite3
 import subprocess
 import tempfile
+import uuid
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -1444,8 +1447,17 @@ class BudgetSnapshotStore:
         _write_json_atomic(self.path, payload)
         return self.path
 
+    def stage(self, payload: dict[str, Any]) -> Path:
+        staged_path = self.path.with_name(f"{self.path.name}.staged-{uuid.uuid4().hex}")
+        _write_json_atomic(staged_path, payload)
+        return staged_path
+
+    def promote(self, payload: dict[str, Any]) -> Path:
+        _write_json_atomic(self.path, payload)
+        return self.path
+
     def replace(self, payload: dict[str, Any]) -> Path:
-        return self.write(payload)
+        return self.promote(payload)
 
 
 class BudgetedCodexLauncher:
@@ -1470,13 +1482,18 @@ class BudgetedCodexLauncher:
         percent: int = 9,
         window: dict[str, Any] | None = None,
         launcher_depth: int | None = None,
+        snapshot_store: BudgetSnapshotStore | None = None,
     ) -> dict[str, Any]:
         prepared = self.governor.resolve_with_budget_plan(context, percent=percent, window=window)
         prepared["recursionPolicy"] = _launcher_recursion_policy(
             _launcher_depth_from_env() if launcher_depth is None else max(launcher_depth, 0)
         )
-        if self.snapshot_store is not None:
-            self.snapshot_store.write(prepared)
+        store = snapshot_store if snapshot_store is not None else self.snapshot_store
+        if store is not None:
+            prepared["stagedSnapshotPath"] = str(store.stage(prepared))
+            prepared["snapshotPath"] = str(store.path)
+            if not store.path.exists():
+                store.write(prepared)
         return prepared
 
     def build_prompt(self, prepared: dict[str, Any], task_prompt: str) -> str:
@@ -1536,12 +1553,16 @@ class BudgetedCodexLauncher:
         snapshot_path: str | Path | None = None,
     ) -> dict[str, Any]:
         current_depth = _launcher_depth_from_env()
-        prepared = self.prepare(context, percent=percent, window=window, launcher_depth=current_depth)
+        store = self._resolve_snapshot_store(snapshot_path)
+        prepared = self.prepare(
+            context,
+            percent=percent,
+            window=window,
+            launcher_depth=current_depth,
+            snapshot_store=store,
+        )
         autonomous_budget = prepared["autonomousBudget"]
         slice_limit_tokens = _coerce_int(autonomous_budget.get("sliceLimitTokens"))
-        store = self._resolve_snapshot_store(snapshot_path)
-        if store is not None:
-            store.write(prepared)
         recursion_policy = prepared["recursionPolicy"]
         if current_depth > 0:
             result = {
@@ -1554,6 +1575,7 @@ class BudgetedCodexLauncher:
             }
             if store is not None:
                 result["snapshotPath"] = str(store.path)
+                result["stagedSnapshotPath"] = prepared.get("stagedSnapshotPath")
             elif snapshot_path is not None:
                 result["snapshotPath"] = str(Path(snapshot_path))
             return result
@@ -1565,6 +1587,8 @@ class BudgetedCodexLauncher:
                 "blocked": True,
                 "reason": "autonomous slice limit is unavailable",
                 "recursionPolicy": recursion_policy,
+                "snapshotPath": str(store.path) if store is not None else (str(Path(snapshot_path)) if snapshot_path is not None else None),
+                "stagedSnapshotPath": prepared.get("stagedSnapshotPath"),
             }
 
         child_env = os.environ.copy()
@@ -1668,15 +1692,17 @@ class BudgetedCodexLauncher:
             "stderr": stderr_lines,
             "autonomousBudget": autonomous_budget,
             "recursionPolicy": recursion_policy,
+            "snapshotPath": str(store.path) if store is not None else (str(Path(snapshot_path)) if snapshot_path is not None else None),
+            "stagedSnapshotPath": prepared.get("stagedSnapshotPath"),
         }
 
-        if store is not None:
+        if store is not None and exit_code == 0 and not terminated_for_budget:
             refreshed = self.governor.resolve_with_budget_plan(context, percent=percent, window=window)
-            store.replace(refreshed)
+            store.promote(refreshed)
             result["refreshedSnapshot"] = refreshed
-            result["snapshotPath"] = str(store.path)
-        elif snapshot_path is not None:
-            result["snapshotPath"] = str(Path(snapshot_path))
+            result["promotionApplied"] = True
+        elif store is not None:
+            result["promotionApplied"] = False
 
         return result
 
@@ -1684,6 +1710,124 @@ class BudgetedCodexLauncher:
         if snapshot_path is not None:
             return BudgetSnapshotStore(snapshot_path)
         return self.snapshot_store
+
+
+def _load_json_object_text(text: str, *, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{label} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{label} must be a JSON object")
+    return payload
+
+
+def _load_json_object_file(path: str | Path, *, label: str) -> dict[str, Any]:
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"Unable to read {label} {path}: {exc}") from exc
+    return _load_json_object_text(text, label=f"{label} {path}")
+
+
+def _default_launch_snapshot_path(env: Mapping[str, str] | None = None, *, workdir: str | Path | None = None) -> Path:
+    env_map = dict(os.environ if env is None else env)
+    out_dir = env_map.get("CODEX_OUT")
+    if out_dir:
+        return Path(out_dir) / "budget-snapshot.json"
+    base_dir = Path(workdir) if workdir is not None else Path.cwd()
+    return base_dir / ".codex_budget_snapshot.json"
+
+
+def launch_budgeted_worker(
+    context: dict[str, Any],
+    task_prompt: str,
+    *,
+    percent: int = 9,
+    window: dict[str, Any] | None = None,
+    workdir: str | Path | None = None,
+    model: str | None = None,
+    output_last_message: str | Path | None = None,
+    extra_args: Sequence[str] | None = None,
+    snapshot_path: str | Path | None = None,
+    process_factory: Any = subprocess.Popen,
+) -> dict[str, Any]:
+    launcher = BudgetedCodexLauncher(process_factory=process_factory)
+    resolved_snapshot_path = snapshot_path or _default_launch_snapshot_path(workdir=workdir)
+    return launcher.launch(
+        context,
+        task_prompt,
+        percent=percent,
+        window=window,
+        workdir=workdir,
+        model=model,
+        output_last_message=output_last_message,
+        extra_args=extra_args,
+        snapshot_path=resolved_snapshot_path,
+    )
+
+
+def _launch_context_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    if args.context_json is not None:
+        context = _load_json_object_text(args.context_json, label="--context-json")
+    elif args.context_file is not None:
+        context = _load_json_object_file(args.context_file, label="--context-file")
+    else:
+        context = {
+            "requestSummary": args.request_summary or args.task_prompt,
+            "taskKind": args.task_kind,
+            "risk": args.risk,
+            "writeIntent": args.write_intent,
+            "networkIntent": args.network_intent,
+            "candidateFiles": [str(item) for item in args.candidate_files],
+            "turnIndex": args.turn_index,
+            "modelName": args.model_name or args.model or "",
+            "untrustedExternalTextPresent": args.untrusted_external_text_present,
+        }
+    if "requestSummary" not in context or context["requestSummary"] in (None, ""):
+        context["requestSummary"] = args.request_summary or args.task_prompt
+    return context
+
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="codex_governor.py",
+        description="Inspect budget snapshots or launch a budgeted Codex child thread.",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    launch = subparsers.add_parser("launch", help="Launch a budgeted Codex child thread.")
+    launch.add_argument("task_prompt", help="Task prompt passed to the child Codex exec run.")
+    launch.add_argument("--context-json", dest="context_json", help="JSON object with the policy context.")
+    launch.add_argument("--context-file", dest="context_file", help="Path to a JSON file with the policy context.")
+    launch.add_argument("--request-summary", dest="request_summary", help="Human summary used when no context JSON is provided.")
+    launch.add_argument("--task-kind", choices=sorted(VALID_TASK_KINDS), default="analysis")
+    launch.add_argument("--risk", choices=sorted(VALID_RISKS), default="low")
+    launch.add_argument("--candidate-file", dest="candidate_files", action="append", default=[], help="Candidate file path; may be repeated.")
+    launch.add_argument("--turn-index", type=int, default=1)
+    launch.add_argument("--model-name", dest="model_name", help="Policy context model name.")
+    launch.add_argument("--write-intent", action="store_true")
+    launch.add_argument("--network-intent", action="store_true")
+    launch.add_argument("--untrusted-external-text-present", action="store_true")
+    launch.add_argument("--percent", type=int, default=9, help="Worker budget slice as a percent of the estimated five-hour allowance.")
+    launch.add_argument("--snapshot-path", dest="snapshot_path", help="Where the live snapshot should be written.")
+    launch.add_argument("--workdir", help="Working directory for the child Codex exec.")
+    launch.add_argument("--model", help="Model passed to the child Codex exec.")
+    launch.add_argument("--output-last-message", dest="output_last_message", help="Where to write the child last message.")
+    launch.add_argument("--extra-arg", dest="extra_args", action="append", default=[], help="Extra argument forwarded to codex exec.")
+
+    return parser
+
+
+def _print_demo_scenarios() -> None:
+    for name, decision, injection in demo_scenarios():
+        print(
+            f"{name}: mode={decision['mode']} source={decision['modeSource']} "
+            f"allow={{subagents={decision['allow']['subagents']}, writes={decision['allow']['writes']}, tests={decision['allow']['tests']}}} "
+            f"blocks={json.dumps(decision['blockReasons'])}"
+        )
+        print(injection)
 
 
 def build_status_provider(
@@ -1894,18 +2038,36 @@ def demoScenarios() -> list[tuple[str, dict[str, Any], str]]:
     return demo_scenarios()
 
 
-def main() -> None:
-    for name, decision, injection in demo_scenarios():
-        print(
-            f"{name}: mode={decision['mode']} source={decision['modeSource']} "
-            f"allow={{subagents={decision['allow']['subagents']}, writes={decision['allow']['writes']}, tests={decision['allow']['tests']}}} "
-            f"blocks={json.dumps(decision['blockReasons'])}"
-        )
-        print(injection)
+def main(argv: Sequence[str] | None = None, *, process_factory: Any = subprocess.Popen) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args:
+        _print_demo_scenarios()
+        return 0
+
+    parser = _build_cli_parser()
+    namespace = parser.parse_args(args)
+    if namespace.command != "launch":
+        parser.error(f"unknown command: {namespace.command}")
+
+    context = _launch_context_from_args(namespace)
+    result = launch_budgeted_worker(
+        context,
+        namespace.task_prompt,
+        percent=namespace.percent,
+        workdir=namespace.workdir,
+        model=namespace.model,
+        output_last_message=namespace.output_last_message,
+        extra_args=namespace.extra_args,
+        snapshot_path=namespace.snapshot_path,
+        process_factory=process_factory,
+    )
+    json.dump(strip_none(result), sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 
 
 __all__ = [
@@ -1924,6 +2086,7 @@ __all__ = [
     "build_usage_provider",
     "demoScenarios",
     "demo_scenarios",
+    "launch_budgeted_worker",
     "main",
     "normalize_status_snapshot",
     "normalize_usage_snapshot",
