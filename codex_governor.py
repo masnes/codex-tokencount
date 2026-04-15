@@ -42,6 +42,13 @@ def _coerce_str(value: Any) -> str | None:
     return str(value)
 
 
+def _env_flag_enabled(value: Any) -> bool:
+    text = _coerce_str(value)
+    if text is None:
+        return False
+    return text.lower() in {"1", "true", "yes", "on"}
+
+
 def _coerce_bool(value: Any) -> bool:
     return bool(value)
 
@@ -162,6 +169,23 @@ def _highest_budget_fraction_used(budgets: Any) -> float | None:
     if not fractions:
         return None
     return max(fractions)
+
+
+def _preferred_live_snapshot_path(source: Path) -> Path | None:
+    if source.is_file():
+        if source.name in {"budget-snapshot.json", ".codex_budget_snapshot.json"}:
+            return source
+        return None
+
+    if not source.is_dir():
+        return None
+
+    # Prefer the governor's own live snapshot when it exists.
+    for name in ("budget-snapshot.json", ".codex_budget_snapshot.json"):
+        candidate = source / name
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _read_sqlite_row(path: Path, query: str, params: Sequence[Any] = ()) -> dict[str, Any] | None:
@@ -480,6 +504,15 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
     temp_path.replace(path)
 
 
+def _append_jsonl(path: Path, payload: Any) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        json.dump(strip_none(payload), handle, sort_keys=True)
+        handle.write("\n")
+    return path
+
+
 def _normalize_window(window: Any, fallback_start: str | None = None) -> dict[str, Any]:
     if not isinstance(window, dict):
         return {"kind": "session", "startAt": fallback_start or _utc_now()}
@@ -492,6 +525,20 @@ def _normalize_window(window: Any, fallback_start: str | None = None) -> dict[st
     if end_at is not None:
         normalized["endAt"] = end_at
     return normalized
+
+
+def _unwrap_budget_snapshot_section(snapshot: Any, section: str) -> Any:
+    if not isinstance(snapshot, dict):
+        return snapshot
+
+    section_snapshot = snapshot.get(section)
+    if not isinstance(section_snapshot, dict):
+        return snapshot
+
+    envelope_markers = ("decision", "autonomousBudget", "injection", "recursionPolicy", "snapshotPath", "stagedSnapshotPath", "promotionApplied")
+    if any(marker in snapshot for marker in envelope_markers):
+        return section_snapshot
+    return snapshot
 
 
 def _normalize_budget_entry(key: str, value: Any) -> dict[str, Any] | None:
@@ -650,6 +697,7 @@ def _normalize_policy_context(context: Any) -> dict[str, Any]:
 
 
 def normalize_status_snapshot(snapshot: Any, *, fallback_captured_at: str | None = None) -> dict[str, Any]:
+    snapshot = _unwrap_budget_snapshot_section(snapshot, "status")
     if not isinstance(snapshot, dict):
         return {
             "provider": "status",
@@ -735,6 +783,7 @@ def normalize_usage_snapshot(
     fallback_window: Any = None,
     fallback_captured_at: str | None = None,
 ) -> dict[str, Any]:
+    snapshot = _unwrap_budget_snapshot_section(snapshot, "usage")
     if not isinstance(snapshot, dict):
         return {
             "provider": "usage",
@@ -896,6 +945,9 @@ def _source_list_from_env(env: Mapping[str, str], keys: Sequence[str]) -> list[s
 
 def _expand_status_source(source: Path) -> list[Path]:
     if source.is_dir():
+        live_snapshot = _preferred_live_snapshot_path(source)
+        if live_snapshot is not None:
+            return [live_snapshot]
         prioritized = [
             source / "status.json",
             source / "status.jsonl",
@@ -913,6 +965,9 @@ def _expand_status_source(source: Path) -> list[Path]:
 
 def _expand_usage_source(source: Path) -> list[Path]:
     if source.is_dir():
+        live_snapshot = _preferred_live_snapshot_path(source)
+        if live_snapshot is not None:
+            return [live_snapshot]
         return sorted(
             [path for path in source.rglob("*") if path.is_file() and path.suffix.lower() in SOURCE_SUFFIXES],
             key=lambda path: (_file_mtime(path) or datetime.min.replace(tzinfo=timezone.utc), path.name),
@@ -934,11 +989,12 @@ def _unique_paths(paths: Sequence[Path]) -> list[Path]:
 def _merge_usage_budgets(records: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     budgets: dict[str, dict[str, Any]] = {}
     for record in records:
-        record_budgets = _normalize_budget_map(record.get("budgets"))
+        source_record = _unwrap_budget_snapshot_section(record, "usage")
+        record_budgets = _normalize_budget_map(source_record.get("budgets"))
         if not record_budgets:
-            record_budgets = _normalize_budget_map(record.get("usage"))
+            record_budgets = _normalize_budget_map(source_record.get("usage"))
         if not record_budgets:
-            record_budgets = _normalize_budget_map(record.get("tokenUsage"))
+            record_budgets = _normalize_budget_map(source_record.get("tokenUsage"))
         if not record_budgets:
             numeric_fields: dict[str, Any] = {}
             for key in (
@@ -953,8 +1009,8 @@ def _merge_usage_budgets(records: Sequence[dict[str, Any]]) -> dict[str, dict[st
                 "used_tokens",
                 "remaining_tokens",
             ):
-                if _coerce_number(record.get(key)) is not None:
-                    numeric_fields[key] = record.get(key)
+                if _coerce_number(source_record.get(key)) is not None:
+                    numeric_fields[key] = source_record.get(key)
             record_budgets = _normalize_budget_map(numeric_fields)
         budgets.update(record_budgets)
     return budgets
@@ -1088,10 +1144,12 @@ class JsonlUsageProvider:
             )
             if explicit_sources:
                 return [Path(item) for item in explicit_sources]
+            out_sources = _source_list_from_env(self._env, ["CODEX_OUT"])
+            if out_sources and _preferred_live_snapshot_path(Path(out_sources[0])) is not None:
+                return [Path(item) for item in out_sources]
             session_rollout = _discover_session_rollout_file(self._env)
             if session_rollout is not None:
                 return [session_rollout]
-            out_sources = _source_list_from_env(self._env, ["CODEX_OUT"])
             return [Path(item) for item in out_sources]
         if isinstance(sources, (str, Path)):
             return [Path(sources)]
@@ -1460,12 +1518,24 @@ class BudgetSnapshotStore:
         return self.promote(payload)
 
 
+class AuditLogStore:
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+
+    def append(self, payload: dict[str, Any]) -> Path:
+        return _append_jsonl(self.path, payload)
+
+    def record(self, payload: dict[str, Any]) -> Path:
+        return self.append(payload)
+
+
 class BudgetedCodexLauncher:
     def __init__(
         self,
         governor: CodexGovernor | None = None,
         *,
         snapshot_store: BudgetSnapshotStore | str | Path | None = None,
+        audit_log_path: str | Path | None = None,
         process_factory: Any = subprocess.Popen,
     ):
         self.governor = governor or CodexGovernor.from_environment()
@@ -1473,6 +1543,7 @@ class BudgetedCodexLauncher:
             self.snapshot_store = snapshot_store
         else:
             self.snapshot_store = BudgetSnapshotStore(snapshot_store)
+        self.audit_log_path = Path(audit_log_path) if audit_log_path is not None else None
         self.process_factory = process_factory
 
     def prepare(
@@ -1527,7 +1598,14 @@ class BudgetedCodexLauncher:
         output_last_message: str | Path | None = None,
         extra_args: Sequence[str] | None = None,
     ) -> list[str]:
-        command = ["codex", "exec", "--json", "--full-auto"]
+        external_sandbox_assumed = _env_flag_enabled(os.environ.get("CODEX_ASSUME_EXTERNAL_SANDBOX"))
+        command = ["codex"]
+        if external_sandbox_assumed:
+            # The outer Podman box is the security boundary here, so skip Codex's nested sandbox.
+            command.append("--dangerously-bypass-approvals-and-sandbox")
+        command.extend(["exec", "--json"])
+        if not external_sandbox_assumed:
+            command.append("--full-auto")
         if workdir is not None:
             command.extend(["-C", str(workdir)])
         if model is not None:
@@ -1551,9 +1629,15 @@ class BudgetedCodexLauncher:
         output_last_message: str | Path | None = None,
         extra_args: Sequence[str] | None = None,
         snapshot_path: str | Path | None = None,
+        audit_log_path: str | Path | None = None,
     ) -> dict[str, Any]:
         current_depth = _launcher_depth_from_env()
         store = self._resolve_snapshot_store(snapshot_path)
+        audit_store = self._resolve_audit_log_store(
+            audit_log_path,
+            workdir=workdir,
+            snapshot_path=snapshot_path,
+        )
         prepared = self.prepare(
             context,
             percent=percent,
@@ -1578,9 +1662,21 @@ class BudgetedCodexLauncher:
                 result["stagedSnapshotPath"] = prepared.get("stagedSnapshotPath")
             elif snapshot_path is not None:
                 result["snapshotPath"] = str(Path(snapshot_path))
+            self._append_launch_audit(
+                audit_store,
+                context=context,
+                task_prompt=task_prompt,
+                prepared=prepared,
+                result=result,
+                command=None,
+                workdir=workdir,
+                model=model,
+                output_last_message=output_last_message,
+                extra_args=extra_args,
+            )
             return result
         if slice_limit_tokens is None:
-            return {
+            result = {
                 "prepared": prepared,
                 "command": None,
                 "terminatedForBudget": False,
@@ -1590,6 +1686,19 @@ class BudgetedCodexLauncher:
                 "snapshotPath": str(store.path) if store is not None else (str(Path(snapshot_path)) if snapshot_path is not None else None),
                 "stagedSnapshotPath": prepared.get("stagedSnapshotPath"),
             }
+            self._append_launch_audit(
+                audit_store,
+                context=context,
+                task_prompt=task_prompt,
+                prepared=prepared,
+                result=result,
+                command=None,
+                workdir=workdir,
+                model=model,
+                output_last_message=output_last_message,
+                extra_args=extra_args,
+            )
+            return result
 
         child_env = os.environ.copy()
         child_env[LAUNCHER_DEPTH_ENV] = str(current_depth + 1)
@@ -1611,6 +1720,28 @@ class BudgetedCodexLauncher:
             text=True,
             bufsize=1,
             env=child_env,
+        )
+
+        self._append_launch_audit(
+            audit_store,
+            context=context,
+            task_prompt=task_prompt,
+            prepared=prepared,
+            result={
+                "blocked": False,
+                "terminatedForBudget": False,
+                "exitCode": None,
+                "observedTokens": None,
+                "promotionApplied": None,
+                "stdout": [],
+                "stderr": [],
+            },
+            command=command,
+            workdir=workdir,
+            model=model,
+            output_last_message=output_last_message,
+            extra_args=extra_args,
+            phase="started",
         )
 
         stdout_lines: list[str] = []
@@ -1704,12 +1835,127 @@ class BudgetedCodexLauncher:
         elif store is not None:
             result["promotionApplied"] = False
 
+        self._append_launch_audit(
+            audit_store,
+            context=context,
+            task_prompt=task_prompt,
+            prepared=prepared,
+            result=result,
+            command=command,
+            workdir=workdir,
+            model=model,
+            output_last_message=output_last_message,
+            extra_args=extra_args,
+        )
+
         return result
 
     def _resolve_snapshot_store(self, snapshot_path: str | Path | None) -> BudgetSnapshotStore | None:
         if snapshot_path is not None:
             return BudgetSnapshotStore(snapshot_path)
         return self.snapshot_store
+
+    def _resolve_audit_log_store(
+        self,
+        audit_log_path: str | Path | None,
+        *,
+        workdir: str | Path | None = None,
+        snapshot_path: str | Path | None = None,
+    ) -> AuditLogStore | None:
+        if audit_log_path is not None:
+            return AuditLogStore(audit_log_path)
+        resolved = self.audit_log_path
+        if resolved is None:
+            resolved = _default_launch_audit_log_path(workdir=workdir, snapshot_path=snapshot_path)
+        return AuditLogStore(resolved)
+
+    def _append_launch_audit(
+        self,
+        audit_store: AuditLogStore | None,
+        *,
+        context: dict[str, Any],
+        task_prompt: str,
+        prepared: dict[str, Any],
+        result: dict[str, Any],
+        command: Sequence[str] | None,
+        workdir: str | Path | None,
+        model: str | None,
+        output_last_message: str | Path | None,
+        extra_args: Sequence[str] | None,
+        phase: str | None = None,
+    ) -> None:
+        if audit_store is None:
+            return
+
+        prompt = task_prompt.strip()
+        command_head = [str(item) for item in command[:-1]] if command else None
+        try:
+            audit_store.append(
+                {
+                    "timestamp": _utc_now(),
+                    "event": "budgeted_codex_launch",
+                    "phase": phase or ("blocked" if result.get("blocked") else "completed"),
+                    "context": {
+                        "requestSummary": context.get("requestSummary"),
+                        "taskKind": context.get("taskKind"),
+                        "risk": context.get("risk"),
+                        "writeIntent": context.get("writeIntent"),
+                        "networkIntent": context.get("networkIntent"),
+                        "candidateFiles": context.get("candidateFiles"),
+                        "turnIndex": context.get("turnIndex"),
+                        "modelName": context.get("modelName"),
+                        "untrustedExternalTextPresent": context.get("untrustedExternalTextPresent"),
+                    },
+                    "prepared": {
+                        "mode": prepared["decision"]["mode"],
+                        "modeSource": prepared["decision"]["modeSource"],
+                        "confidence": prepared["decision"]["confidence"],
+                        "allow": prepared["decision"]["allow"],
+                        "limits": prepared["decision"]["limits"],
+                        "blockReasons": prepared["decision"]["blockReasons"],
+                        "requiredBehaviors": prepared["decision"]["requiredBehaviors"],
+                        "status": {
+                            "state": prepared["status"]["state"],
+                            "confidence": prepared["status"]["confidence"],
+                            "capturedAt": prepared["status"]["capturedAt"],
+                            "mode": prepared["status"].get("mode"),
+                            "warnings": prepared["status"].get("warnings") or [],
+                        },
+                        "usage": {
+                            "state": prepared["usage"]["state"],
+                            "confidence": prepared["usage"]["confidence"],
+                            "capturedAt": prepared["usage"]["capturedAt"],
+                            "warnings": prepared["usage"].get("warnings") or [],
+                            "sourceFiles": prepared["usage"].get("sourceFiles") or [],
+                        },
+                        "autonomousBudget": prepared["autonomousBudget"],
+                        "recursionPolicy": prepared["recursionPolicy"],
+                    },
+                    "launch": {
+                        "commandHead": command_head,
+                        "workdir": str(workdir) if workdir is not None else None,
+                        "model": model,
+                        "outputLastMessage": str(output_last_message) if output_last_message is not None else None,
+                        "extraArgs": [str(item) for item in extra_args] if extra_args else [],
+                        "taskPromptPreview": prompt[:240],
+                        "taskPromptLength": len(prompt),
+                    },
+                    "result": {
+                        "blocked": result.get("blocked", False),
+                        "reason": result.get("reason"),
+                        "exitCode": result.get("exitCode"),
+                        "terminatedForBudget": result.get("terminatedForBudget"),
+                        "observedTokens": result.get("observedTokens"),
+                        "promotionApplied": result.get("promotionApplied"),
+                        "snapshotPath": result.get("snapshotPath"),
+                        "stagedSnapshotPath": result.get("stagedSnapshotPath"),
+                        "stdoutTail": (result.get("stdout") or [])[-3:],
+                        "stderrTail": (result.get("stderr") or [])[-3:],
+                    },
+                }
+            )
+        except Exception:
+            return
 
 
 def _load_json_object_text(text: str, *, label: str) -> dict[str, Any]:
@@ -1740,6 +1986,25 @@ def _default_launch_snapshot_path(env: Mapping[str, str] | None = None, *, workd
     return base_dir / ".codex_budget_snapshot.json"
 
 
+def _default_launch_audit_log_path(
+    env: Mapping[str, str] | None = None,
+    *,
+    workdir: str | Path | None = None,
+    snapshot_path: str | Path | None = None,
+) -> Path:
+    env_map = dict(os.environ if env is None else env)
+    explicit = _coerce_str(env_map.get("CODEX_AUDIT_LOG"))
+    if explicit is not None:
+        return Path(explicit)
+    out_dir = env_map.get("CODEX_OUT")
+    if out_dir:
+        return Path(out_dir) / "governor-audit.jsonl"
+    if snapshot_path is not None:
+        return Path(snapshot_path).with_name("governor-audit.jsonl")
+    base_dir = Path(workdir) if workdir is not None else Path.cwd()
+    return base_dir / ".codex_governor_audit.jsonl"
+
+
 def launch_budgeted_worker(
     context: dict[str, Any],
     task_prompt: str,
@@ -1751,9 +2016,10 @@ def launch_budgeted_worker(
     output_last_message: str | Path | None = None,
     extra_args: Sequence[str] | None = None,
     snapshot_path: str | Path | None = None,
+    audit_log_path: str | Path | None = None,
     process_factory: Any = subprocess.Popen,
 ) -> dict[str, Any]:
-    launcher = BudgetedCodexLauncher(process_factory=process_factory)
+    launcher = BudgetedCodexLauncher(process_factory=process_factory, audit_log_path=audit_log_path)
     resolved_snapshot_path = snapshot_path or _default_launch_snapshot_path(workdir=workdir)
     return launcher.launch(
         context,
@@ -1765,6 +2031,7 @@ def launch_budgeted_worker(
         output_last_message=output_last_message,
         extra_args=extra_args,
         snapshot_path=resolved_snapshot_path,
+        audit_log_path=audit_log_path,
     )
 
 
@@ -1812,6 +2079,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     launch.add_argument("--untrusted-external-text-present", action="store_true")
     launch.add_argument("--percent", type=int, default=9, help="Worker budget slice as a percent of the estimated five-hour allowance.")
     launch.add_argument("--snapshot-path", dest="snapshot_path", help="Where the live snapshot should be written.")
+    launch.add_argument("--audit-log-path", dest="audit_log_path", help="Where the audit log should be appended.")
     launch.add_argument("--workdir", help="Working directory for the child Codex exec.")
     launch.add_argument("--model", help="Model passed to the child Codex exec.")
     launch.add_argument("--output-last-message", dest="output_last_message", help="Where to write the child last message.")
@@ -1841,6 +2109,10 @@ def build_status_provider(
         ["CODEX_STATUS_FILES", "CODEX_STATUS_FILE", "CODEX_STATUS_PATH", "CODEX_STATUS_DIR"],
     )
     if explicit_sources:
+        return FileStatusProvider(env=env_map)
+
+    out_sources = _source_list_from_env(env_map, ["CODEX_OUT"])
+    if out_sources and _preferred_live_snapshot_path(Path(out_sources[0])) is not None:
         return FileStatusProvider(env=env_map)
 
     session_rollout = _discover_session_rollout_file(env_map)
@@ -2059,6 +2331,7 @@ def main(argv: Sequence[str] | None = None, *, process_factory: Any = subprocess
         output_last_message=namespace.output_last_message,
         extra_args=namespace.extra_args,
         snapshot_path=namespace.snapshot_path,
+        audit_log_path=namespace.audit_log_path,
         process_factory=process_factory,
     )
     json.dump(strip_none(result), sys.stdout, indent=2, sort_keys=True)
@@ -2071,6 +2344,7 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "AuditLogStore",
     "BudgetGovernor",
     "BudgetSnapshotStore",
     "BudgetedCodexLauncher",

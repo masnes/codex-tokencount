@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import io
 import json
+import shutil
+import subprocess
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -10,6 +12,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from codex_governor import (
+    AuditLogStore,
     BudgetGovernor,
     BudgetSnapshotStore,
     BudgetedCodexLauncher,
@@ -63,6 +66,15 @@ def base_context(overrides: dict[str, object] | None = None) -> dict[str, object
     if overrides:
         context.update(overrides)
     return context
+
+
+def launcher_env(*, depth: int = 0, assume_external_sandbox: bool | None = None) -> dict[str, str]:
+    env = {"CODEX_LAUNCHER_DEPTH": str(depth)}
+    if assume_external_sandbox is True:
+        env["CODEX_ASSUME_EXTERNAL_SANDBOX"] = "1"
+    elif assume_external_sandbox is False:
+        env["CODEX_ASSUME_EXTERNAL_SANDBOX"] = ""
+    return env
 
 
 def write_rollout(path: Path, *, used_percent: float, total_tokens: int, weekly_used_percent: float = 19.0) -> None:
@@ -144,6 +156,66 @@ def write_rollout(path: Path, *, used_percent: float, total_tokens: int, weekly_
                     }
                 ),
             ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def write_live_snapshot(path: Path, *, used_tokens: int, limit_tokens: int) -> None:
+    budget_reset_at = "2026-04-15T09:54:28Z"
+    weekly_reset_at = "2026-04-18T00:41:52Z"
+    status = {
+        "provider": "codex-session",
+        "capturedAt": "2026-04-14T18:45:00Z",
+        "state": "ok",
+        "confidence": "high",
+        "mode": "normal",
+        "budgets": {
+            "five_hour_window": {
+                "unit": "tokens",
+                "used": used_tokens,
+                "limit": limit_tokens,
+                "remaining": limit_tokens - used_tokens,
+                "resetAt": budget_reset_at,
+            },
+            "weekly_window": {
+                "unit": "percent",
+                "used": 26.0,
+                "limit": 100,
+                "remaining": 74,
+                "resetAt": weekly_reset_at,
+            },
+        },
+        "warnings": [],
+        "resetAt": budget_reset_at,
+    }
+    usage = {
+        "provider": "codex-rollout",
+        "capturedAt": "2026-04-14T18:45:01Z",
+        "state": "ok",
+        "confidence": "high",
+        "estimatesOnly": True,
+        "window": {"kind": "session", "startAt": "2026-04-14T18:00:00Z"},
+        "budgets": status["budgets"],
+        "warnings": [],
+        "sourceFiles": [str(path)],
+        "turnCount": 1,
+        "eventCount": 1,
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "autonomousBudget": {
+                    "slicePercent": 5,
+                    "estimatedFiveHourLimitTokens": limit_tokens,
+                    "sliceLimitTokens": int(round(limit_tokens * 0.05)),
+                    "sourceFiles": [str(path)],
+                    "warnings": [],
+                },
+                "status": status,
+                "usage": usage,
+                "snapshotPath": str(path),
+            }
         ),
         encoding="utf-8",
     )
@@ -446,6 +518,23 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             self.assertEqual(payload["status"]["mode"], "normal")
             self.assertIn("five_hour_window", payload["usage"]["budgets"])
 
+    def test_governor_prefers_live_snapshot_envelope_from_codex_out(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            snapshot_path = out_dir / "budget-snapshot.json"
+            write_live_snapshot(snapshot_path, used_tokens=1000, limit_tokens=2000)
+
+            governor = BudgetGovernor.from_environment({"CODEX_OUT": str(out_dir)})
+            result = governor.evaluate(base_context({"requestSummary": "use live budget snapshot"}))
+            plan = governor.plan_autonomous_budget(percent=5)
+
+            self.assertEqual(result["status"]["state"], "ok")
+            self.assertEqual(result["usage"]["sourceFiles"], [str(snapshot_path)])
+            self.assertEqual(result["decision"]["mode"], "normal")
+            self.assertEqual(plan["estimatedFiveHourLimitTokens"], 2000)
+            self.assertEqual(plan["sliceLimitTokens"], 100)
+            self.assertEqual(plan["sourceFiles"], [str(snapshot_path)])
+
     def test_resolve_with_budget_plan_reads_usage_once(self) -> None:
         class CountingUsageProvider:
             def __init__(self, snapshot: dict[str, object]):
@@ -487,42 +576,128 @@ class CodexGovernorSpikeTest(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             rollout_path = Path(tmpdir) / "rollout.jsonl"
             snapshot_path = Path(tmpdir) / "budget-snapshot.json"
+            audit_log_path = Path(tmpdir) / "governor-audit.jsonl"
             write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
             governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
-            launcher = BudgetedCodexLauncher(governor, snapshot_store=BudgetSnapshotStore(snapshot_path), process_factory=lambda *args, **kwargs: FakeProcess([]))
+            launcher = BudgetedCodexLauncher(
+                governor,
+                snapshot_store=BudgetSnapshotStore(snapshot_path),
+                audit_log_path=audit_log_path,
+                process_factory=lambda *args, **kwargs: FakeProcess([]),
+            )
             live_store = BudgetSnapshotStore(snapshot_path)
             live_store.write({"snapshot": "live"})
 
-            prepared = launcher.prepare(base_context({"requestSummary": "launch child"}), percent=9)
-            command = launcher.build_command(prepared, "child task", workdir=Path(tmpdir), model="gpt-5.4-mini")
+            with patch.dict(os.environ, launcher_env(depth=0, assume_external_sandbox=False), clear=False):
+                prepared = launcher.prepare(base_context({"requestSummary": "launch child"}), percent=9)
+                command = launcher.build_command(prepared, "child task", workdir=Path(tmpdir), model="gpt-5.4-mini")
 
-            self.assertEqual(command[0:3], ["codex", "exec", "--json"])
-            self.assertIn("--full-auto", command)
-            self.assertIn("-C", command)
-            self.assertIn("child task", command[-1])
-            self.assertTrue(snapshot_path.exists())
-            stored = json.loads(snapshot_path.read_text(encoding="utf-8"))
-            self.assertEqual(stored, {"snapshot": "live"})
-            staged_path = Path(prepared["stagedSnapshotPath"])
-            self.assertTrue(staged_path.exists())
-            staged = json.loads(staged_path.read_text(encoding="utf-8"))
-            self.assertIn("autonomousBudget", staged)
-            self.assertEqual(staged["autonomousBudget"]["sliceLimitTokens"], 900)
-            self.assertEqual(staged["recursionPolicy"]["currentDepth"], 0)
-            self.assertFalse(staged["recursionPolicy"]["allowed"])
+                self.assertEqual(command[0:3], ["codex", "exec", "--json"])
+                self.assertIn("--full-auto", command)
+                self.assertIn("-C", command)
+                self.assertIn("child task", command[-1])
+                self.assertTrue(snapshot_path.exists())
+                stored = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                self.assertEqual(stored, {"snapshot": "live"})
+                staged_path = Path(prepared["stagedSnapshotPath"])
+                self.assertTrue(staged_path.exists())
+                staged = json.loads(staged_path.read_text(encoding="utf-8"))
+                self.assertIn("autonomousBudget", staged)
+                self.assertEqual(staged["autonomousBudget"]["sliceLimitTokens"], 900)
+                self.assertEqual(staged["recursionPolicy"]["currentDepth"], 0)
+                self.assertFalse(staged["recursionPolicy"]["allowed"])
 
-            launch_result = launcher.launch(
-                base_context({"requestSummary": "launch child"}),
-                "child task",
-                percent=9,
-                workdir=Path(tmpdir),
-                model="gpt-5.4-mini",
-                snapshot_path=snapshot_path,
+                launch_result = launcher.launch(
+                    base_context({"requestSummary": "launch child"}),
+                    "child task",
+                    percent=9,
+                    workdir=Path(tmpdir),
+                    model="gpt-5.4-mini",
+                    snapshot_path=snapshot_path,
+                    audit_log_path=audit_log_path,
+                )
+                self.assertTrue(launch_result["promotionApplied"])
+                promoted = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                self.assertIn("autonomousBudget", promoted)
+                self.assertEqual(promoted["autonomousBudget"]["sliceLimitTokens"], 900)
+                self.assertTrue(audit_log_path.exists())
+                audit_lines = audit_log_path.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(len(audit_lines), 2)
+                start_record = json.loads(audit_lines[0])
+                audit_record = json.loads(audit_lines[-1])
+                self.assertEqual(start_record["phase"], "started")
+                self.assertEqual(audit_record["event"], "budgeted_codex_launch")
+                self.assertEqual(audit_record["phase"], "completed")
+                self.assertEqual(audit_record["prepared"]["mode"], "normal")
+                self.assertEqual(audit_record["result"]["exitCode"], 0)
+                self.assertTrue(audit_record["result"]["promotionApplied"])
+
+    def test_budgeted_launcher_bypasses_child_sandbox_in_external_box(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rollout_path = Path(tmpdir) / "rollout.jsonl"
+            snapshot_path = Path(tmpdir) / "budget-snapshot.json"
+            write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
+            governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
+            BudgetSnapshotStore(snapshot_path).write({"snapshot": "live"})
+
+            captured: dict[str, object] = {}
+
+            def factory(*args: object, **kwargs: object) -> FakeProcess:
+                captured["command"] = list(args[0])
+                return FakeProcess([])
+
+            launcher = BudgetedCodexLauncher(
+                governor,
+                snapshot_store=BudgetSnapshotStore(snapshot_path),
+                process_factory=factory,
             )
-            self.assertTrue(launch_result["promotionApplied"])
+
+            with patch.dict(os.environ, launcher_env(depth=0, assume_external_sandbox=True), clear=False):
+                result = launcher.launch(
+                    base_context({"requestSummary": "launch child"}),
+                    "child task",
+                    percent=9,
+                    workdir=Path(tmpdir),
+                    model="gpt-5.4-mini",
+                    snapshot_path=snapshot_path,
+                )
+
+            self.assertTrue(result["promotionApplied"])
+            self.assertEqual(
+                captured["command"][0:4],
+                ["codex", "--dangerously-bypass-approvals-and-sandbox", "exec", "--json"],
+            )
+            self.assertNotIn("--full-auto", captured["command"])
+
+    def test_audit_log_failure_does_not_block_launch(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rollout_path = Path(tmpdir) / "rollout.jsonl"
+            snapshot_path = Path(tmpdir) / "budget-snapshot.json"
+            audit_log_path = Path(tmpdir) / "governor-audit.jsonl"
+            write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
+            governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
+            BudgetSnapshotStore(snapshot_path).write({"snapshot": "live"})
+
+            with patch.dict(os.environ, launcher_env(depth=0, assume_external_sandbox=False), clear=False):
+                with patch.object(AuditLogStore, "append", side_effect=RuntimeError("audit failed")):
+                    launcher = BudgetedCodexLauncher(
+                        governor,
+                        snapshot_store=BudgetSnapshotStore(snapshot_path),
+                        audit_log_path=audit_log_path,
+                        process_factory=lambda *args, **kwargs: FakeProcess([]),
+                    )
+                    result = launcher.launch(
+                        base_context({"requestSummary": "launch with failing audit"}),
+                        "child task",
+                        percent=9,
+                        snapshot_path=snapshot_path,
+                        audit_log_path=audit_log_path,
+                    )
+
+            self.assertTrue(result["promotionApplied"])
             promoted = json.loads(snapshot_path.read_text(encoding="utf-8"))
             self.assertIn("autonomousBudget", promoted)
-            self.assertEqual(promoted["autonomousBudget"]["sliceLimitTokens"], 900)
+            self.assertFalse(audit_log_path.exists())
 
     def test_budgeted_launcher_bootstraps_live_snapshot_when_missing(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -553,6 +728,7 @@ class CodexGovernorSpikeTest(unittest.TestCase):
                 {
                     "CODEX_OUT": str(out_dir),
                     "CODEX_ROLLOUT_FILE": str(rollout_path),
+                    **launcher_env(depth=0, assume_external_sandbox=False),
                 },
                 clear=False,
             ):
@@ -581,11 +757,17 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             self.assertTrue(result["promotionApplied"])
             self.assertTrue(Path(result["stagedSnapshotPath"]).exists())
             self.assertTrue(expected_snapshot.exists())
+            expected_audit = out_dir / "governor-audit.jsonl"
+            self.assertTrue(expected_audit.exists())
+            audit_record = json.loads(expected_audit.read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual(audit_record["event"], "budgeted_codex_launch")
+            self.assertEqual(audit_record["result"]["exitCode"], 0)
 
     def test_budgeted_launcher_blocks_recursive_invocation(self) -> None:
         with TemporaryDirectory() as tmpdir:
             rollout_path = Path(tmpdir) / "rollout.jsonl"
             snapshot_path = Path(tmpdir) / "budget-snapshot.json"
+            audit_log_path = Path(tmpdir) / "governor-audit.jsonl"
             write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
             governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
             BudgetSnapshotStore(snapshot_path).write({"snapshot": "live"})
@@ -600,15 +782,17 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             launcher = BudgetedCodexLauncher(
                 governor,
                 snapshot_store=BudgetSnapshotStore(snapshot_path),
+                audit_log_path=audit_log_path,
                 process_factory=factory,
             )
 
-            with patch.dict(os.environ, {"CODEX_LAUNCHER_DEPTH": "1"}, clear=False):
+            with patch.dict(os.environ, launcher_env(depth=1, assume_external_sandbox=False), clear=False):
                 result = launcher.launch(
                     base_context({"requestSummary": "recursive child"}),
                     "nested task",
                     percent=9,
                     snapshot_path=snapshot_path,
+                    audit_log_path=audit_log_path,
                 )
 
             self.assertTrue(result["blocked"])
@@ -622,6 +806,10 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             stored = json.loads(snapshot_path.read_text(encoding="utf-8"))
             self.assertEqual(stored, {"snapshot": "live"})
             self.assertTrue(Path(result["stagedSnapshotPath"]).exists())
+            self.assertTrue(audit_log_path.exists())
+            audit_record = json.loads(audit_log_path.read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual(audit_record["phase"], "blocked")
+            self.assertTrue(audit_record["result"]["blocked"])
 
     def test_budgeted_launcher_stops_child_at_slice_limit(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -673,12 +861,13 @@ class CodexGovernorSpikeTest(unittest.TestCase):
                 process_factory=factory,
             )
 
-            result = launcher.launch(
-                base_context({"requestSummary": "child work"}),
-                "child task",
-                percent=9,
-                snapshot_path=snapshot_path,
-            )
+            with patch.dict(os.environ, launcher_env(depth=0, assume_external_sandbox=False), clear=False):
+                result = launcher.launch(
+                    base_context({"requestSummary": "child work"}),
+                    "child task",
+                    percent=9,
+                    snapshot_path=snapshot_path,
+                )
 
             self.assertTrue(fake_process.terminated)
             self.assertTrue(result["terminatedForBudget"])
@@ -690,6 +879,96 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             self.assertEqual(refreshed, {"snapshot": "live"})
             self.assertFalse(result["promotionApplied"])
             self.assertTrue(Path(result["stagedSnapshotPath"]).exists())
+
+    def test_hour_run_wrapper_refuses_nested_launches(self) -> None:
+        script = Path(__file__).resolve().parent / "tools" / "codex-hour-run"
+        env = os.environ.copy()
+        env["CODEX_LAUNCHER_DEPTH"] = "1"
+        completed = subprocess.run(
+            ["bash", str(script), "continue the governor work"],
+            cwd=str(Path(__file__).resolve().parent),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("recursive launcher invocations are disabled", completed.stderr)
+
+    def test_hour_run_watch_streams_existing_audit_record(self) -> None:
+        repo_root = Path(__file__).resolve().parent
+        with TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            temp_tools = tmp_root / "tools"
+            temp_tools.mkdir()
+
+            shutil.copy2(repo_root / "tools" / "codex-hour-watch", temp_tools / "codex-hour-watch")
+
+            fake_run = temp_tools / "codex-hour-run"
+            fake_run.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p "$CODEX_OUT"
+cat > "$CODEX_OUT/governor-audit.jsonl" <<'EOF'
+{"context":{"requestSummary":"hello"},"event":"budgeted_codex_launch","launch":{"taskPromptPreview":"hello"},"phase":"completed","prepared":{"autonomousBudget":{"sliceLimitTokens":10},"blockReasons":[],"mode":"normal"},"result":{"exitCode":0,"observedTokens":1,"promotionApplied":false},"timestamp":"2026-04-15T00:00:00Z"}
+EOF
+sleep 1
+""",
+                encoding="utf-8",
+            )
+            os.chmod(fake_run, 0o755)
+
+            out_dir = tmp_root / "out"
+            env = os.environ.copy()
+            env["CODEX_LAUNCHER_DEPTH"] = "0"
+            env["CODEX_OUT"] = str(out_dir)
+            completed = subprocess.run(
+                [str(temp_tools / "codex-hour-watch"), "hello"],
+                cwd=str(tmp_root),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("[watch] out_dir=", completed.stdout)
+            self.assertIn("completed mode=normal exit=0 tokens=1/10 prompt=hello", completed.stderr)
+            self.assertIn("launcher exited; stopping audit tail", completed.stderr)
+            audit_path = out_dir / "governor-audit.jsonl"
+            text_audit_path = out_dir / "governor-audit-text.jsonl"
+            self.assertTrue(audit_path.exists())
+            self.assertTrue(text_audit_path.exists())
+            audit_records = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            text_audit_records = [json.loads(line) for line in text_audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertTrue(all(record.get("event") != "audit_text" for record in audit_records))
+            self.assertTrue(any(record.get("event") == "audit_text" for record in text_audit_records))
+            self.assertTrue(
+                any(
+                    record.get("event") == "audit_text"
+                    and "completed mode=normal exit=0 tokens=1/10 prompt=hello" in str(record.get("text"))
+                    for record in text_audit_records
+                )
+            )
+
+    def test_hour_run_watch_wrapper_refuses_nested_launches(self) -> None:
+        script = Path(__file__).resolve().parent / "tools" / "codex-hour-watch"
+        env = os.environ.copy()
+        env["CODEX_LAUNCHER_DEPTH"] = "1"
+        completed = subprocess.run(
+            ["bash", str(script), "continue the governor work"],
+            cwd=str(Path(__file__).resolve().parent),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("recursive launcher invocations are disabled", completed.stderr)
 
 
 if __name__ == "__main__":
