@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import io
 import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from codex_governor import (
     BudgetGovernor,
@@ -498,6 +500,48 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             stored = json.loads(snapshot_path.read_text(encoding="utf-8"))
             self.assertIn("autonomousBudget", stored)
             self.assertEqual(stored["autonomousBudget"]["sliceLimitTokens"], 900)
+            self.assertEqual(stored["recursionPolicy"]["currentDepth"], 0)
+            self.assertFalse(stored["recursionPolicy"]["allowed"])
+
+    def test_budgeted_launcher_blocks_recursive_invocation(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rollout_path = Path(tmpdir) / "rollout.jsonl"
+            snapshot_path = Path(tmpdir) / "budget-snapshot.json"
+            write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
+            governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
+
+            called = False
+
+            def factory(*args: object, **kwargs: object) -> FakeProcess:
+                nonlocal called
+                called = True
+                return FakeProcess([])
+
+            launcher = BudgetedCodexLauncher(
+                governor,
+                snapshot_store=BudgetSnapshotStore(snapshot_path),
+                process_factory=factory,
+            )
+
+            with patch.dict(os.environ, {"CODEX_LAUNCHER_DEPTH": "1"}, clear=False):
+                result = launcher.launch(
+                    base_context({"requestSummary": "recursive child"}),
+                    "nested task",
+                    percent=9,
+                    snapshot_path=snapshot_path,
+                )
+
+            self.assertTrue(result["blocked"])
+            self.assertEqual(
+                result["reason"],
+                "recursive launcher invocations are disabled until recursion accounting is implemented",
+            )
+            self.assertFalse(called)
+            self.assertEqual(result["recursionPolicy"]["currentDepth"], 1)
+            self.assertTrue(snapshot_path.exists())
+            stored = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["recursionPolicy"]["currentDepth"], 1)
+            self.assertFalse(stored["recursionPolicy"]["allowed"])
 
     def test_budgeted_launcher_stops_child_at_slice_limit(self) -> None:
         with TemporaryDirectory() as tmpdir:

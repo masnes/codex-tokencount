@@ -20,6 +20,10 @@ SOURCE_SUFFIXES = (".json", ".jsonl", ".ndjson", ".log")
 DEFAULT_STATE_DB = Path("/codex-home/state_5.sqlite")
 LIVE_MODE_CONSTRAINED_USED_FRACTION = 0.80
 LIVE_MODE_EMERGENCY_USED_FRACTION = 0.95
+LAUNCHER_DEPTH_ENV = "CODEX_LAUNCHER_DEPTH"
+LAUNCHER_RECURSION_ALLOWED_ENV = "CODEX_LAUNCHER_RECURSION_ALLOWED"
+LAUNCHER_RECURSION_BUDGET_ENV = "CODEX_LAUNCHER_RECURSION_BUDGET_TOKENS"
+LAUNCHER_RECURSION_DISABLED_REASON = "recursive launcher invocations are disabled until recursion accounting is implemented"
 
 
 def _utc_now() -> str:
@@ -442,6 +446,25 @@ def _json_event_payload(event: dict[str, Any]) -> dict[str, Any] | None:
 
 def _budget_snapshot_prompt_block(snapshot: dict[str, Any]) -> str:
     return json.dumps(strip_none(snapshot), indent=2, sort_keys=True)
+
+
+def _launcher_depth_from_env(env: Mapping[str, str] | None = None) -> int:
+    env_map = dict(os.environ if env is None else env)
+    depth = _coerce_int(env_map.get(LAUNCHER_DEPTH_ENV))
+    if depth is None or depth < 0:
+        return 0
+    return depth
+
+
+def _launcher_recursion_policy(depth: int) -> dict[str, Any]:
+    return {
+        "allowed": False,
+        "currentDepth": depth,
+        "nextDepth": depth + 1,
+        "budgetPercent": 0,
+        "budgetTokens": 0,
+        "reason": LAUNCHER_RECURSION_DISABLED_REASON,
+    }
 
 
 def _write_json_atomic(path: Path, payload: Any) -> None:
@@ -1446,8 +1469,12 @@ class BudgetedCodexLauncher:
         *,
         percent: int = 9,
         window: dict[str, Any] | None = None,
+        launcher_depth: int | None = None,
     ) -> dict[str, Any]:
         prepared = self.governor.resolve_with_budget_plan(context, percent=percent, window=window)
+        prepared["recursionPolicy"] = _launcher_recursion_policy(
+            _launcher_depth_from_env() if launcher_depth is None else max(launcher_depth, 0)
+        )
         if self.snapshot_store is not None:
             self.snapshot_store.write(prepared)
         return prepared
@@ -1459,6 +1486,7 @@ class BudgetedCodexLauncher:
                 "status": prepared["status"],
                 "usage": prepared["usage"],
                 "autonomousBudget": prepared["autonomousBudget"],
+                "recursionPolicy": prepared["recursionPolicy"],
                 "directives": prepared["decision"]["requiredBehaviors"],
             }
         )
@@ -1507,9 +1535,28 @@ class BudgetedCodexLauncher:
         extra_args: Sequence[str] | None = None,
         snapshot_path: str | Path | None = None,
     ) -> dict[str, Any]:
-        prepared = self.prepare(context, percent=percent, window=window)
+        current_depth = _launcher_depth_from_env()
+        prepared = self.prepare(context, percent=percent, window=window, launcher_depth=current_depth)
         autonomous_budget = prepared["autonomousBudget"]
         slice_limit_tokens = _coerce_int(autonomous_budget.get("sliceLimitTokens"))
+        store = self._resolve_snapshot_store(snapshot_path)
+        if store is not None:
+            store.write(prepared)
+        recursion_policy = prepared["recursionPolicy"]
+        if current_depth > 0:
+            result = {
+                "prepared": prepared,
+                "command": None,
+                "terminatedForBudget": False,
+                "blocked": True,
+                "reason": recursion_policy["reason"],
+                "recursionPolicy": recursion_policy,
+            }
+            if store is not None:
+                result["snapshotPath"] = str(store.path)
+            elif snapshot_path is not None:
+                result["snapshotPath"] = str(Path(snapshot_path))
+            return result
         if slice_limit_tokens is None:
             return {
                 "prepared": prepared,
@@ -1517,12 +1564,13 @@ class BudgetedCodexLauncher:
                 "terminatedForBudget": False,
                 "blocked": True,
                 "reason": "autonomous slice limit is unavailable",
+                "recursionPolicy": recursion_policy,
             }
 
-        store = self._resolve_snapshot_store(snapshot_path)
-        if store is not None:
-            store.write(prepared)
-
+        child_env = os.environ.copy()
+        child_env[LAUNCHER_DEPTH_ENV] = str(current_depth + 1)
+        child_env[LAUNCHER_RECURSION_ALLOWED_ENV] = "0"
+        child_env[LAUNCHER_RECURSION_BUDGET_ENV] = "0"
         command = self.build_command(
             prepared,
             task_prompt,
@@ -1538,6 +1586,7 @@ class BudgetedCodexLauncher:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=child_env,
         )
 
         stdout_lines: list[str] = []
@@ -1618,6 +1667,7 @@ class BudgetedCodexLauncher:
             "stdout": stdout_lines,
             "stderr": stderr_lines,
             "autonomousBudget": autonomous_budget,
+            "recursionPolicy": recursion_policy,
         }
 
         if store is not None:
