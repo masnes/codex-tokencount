@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  ./tools/codex-watch-run [TARGET]
+  ./tools/codex-watch-run --audit-log PATH [--pid PID]
+
+Examples:
+  ./tools/codex-watch-run /workspace/_codex_out/meta-goal-20260415T100505Z-332
+  ./tools/codex-watch-run /workspace/_codex_out/meta-goal-20260415T100505Z-332/governor-audit.jsonl
+  ./tools/codex-watch-run --audit-log /workspace/_codex_out/meta-goal-20260415T100505Z-332/governor-audit.jsonl
+  ./tools/codex-watch-run --audit-log /workspace/_codex_out/meta-goal-20260415T100505Z-332/governor-audit.jsonl --pid 333
+
+Behavior:
+  - Watches an existing audit log only.
+  - Does not launch a new Codex run.
+  - Prints one summary line per budgeted launch record.
+USAGE
+}
+
+target=""
+audit_log=""
+launcher_pid=""
+
+while (($#)); do
+  case "$1" in
+    --audit-log)
+      [[ $# -ge 2 ]] || { echo "--audit-log requires a value" >&2; usage; exit 2; }
+      audit_log="$2"
+      shift 2
+      ;;
+    --pid)
+      [[ $# -ge 2 ]] || { echo "--pid requires a value" >&2; usage; exit 2; }
+      launcher_pid="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      if [[ -n "$target" ]]; then
+        echo "Only one target path may be provided." >&2
+        usage
+        exit 2
+      fi
+      target="$1"
+      shift
+      ;;
+  esac
+done
+
+if (($#)); then
+  echo "Unexpected extra arguments: $*" >&2
+  usage
+  exit 2
+fi
+
+if [[ -n "$audit_log" && -n "$target" ]]; then
+  echo "Use either --audit-log or a positional target, not both." >&2
+  usage
+  exit 2
+fi
+
+if [[ -z "$audit_log" ]]; then
+  if [[ -z "$target" ]]; then
+    target="${CODEX_OUT:-$PWD}"
+  fi
+  if [[ -d "$target" ]]; then
+    audit_log="$target/governor-audit.jsonl"
+  else
+    audit_log="$target"
+  fi
+fi
+
+if [[ -z "${audit_log//[[:space:]]/}" ]]; then
+  usage
+  exit 2
+fi
+
+exec python - "$audit_log" "${launcher_pid:-}" <<'PY'
+import json
+import os
+import pathlib
+import sys
+import time
+from datetime import datetime, timezone
+
+path = pathlib.Path(sys.argv[1])
+launcher_pid = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else None
+heartbeat_seconds = 15
+last_emit = time.monotonic()
+
+
+def stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def alive(pid: int | None) -> bool | None:
+    if pid is None:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def summarize(record: dict[str, object]) -> bool:
+    if record.get("event") != "budgeted_codex_launch":
+        return False
+    prepared = record.get("prepared") or {}
+    result = record.get("result") or {}
+    launch = record.get("launch") or {}
+    context = record.get("context") or {}
+    autonomous_budget = prepared.get("autonomousBudget") or {}
+    phase = str(record.get("phase") or "?")
+    mode = str(prepared.get("mode") or "?")
+    exit_code = result.get("exitCode")
+    observed = result.get("observedTokens")
+    slice_limit = autonomous_budget.get("sliceLimitTokens")
+    prompt = launch.get("taskPromptPreview") or context.get("requestSummary") or ""
+    prompt = " ".join(str(prompt).split())
+    if len(prompt) > 96:
+        prompt = prompt[:93] + "..."
+    flags: list[str] = []
+    if result.get("blocked"):
+        flags.append("blocked")
+    if result.get("terminatedForBudget"):
+        flags.append("budget-stop")
+    if result.get("promotionApplied"):
+        flags.append("promoted")
+    if prepared.get("blockReasons"):
+        flags.append(f"blocks={len(prepared.get('blockReasons') or [])}")
+    suffix = f" {' '.join(flags)}" if flags else ""
+    print(
+        f"[{stamp()}] {phase} mode={mode} exit={exit_code} "
+        f"tokens={observed}/{slice_limit}{suffix} prompt={prompt}",
+        flush=True,
+    )
+    return phase in {"completed", "blocked"} or exit_code is not None or bool(result.get("blocked"))
+
+
+print(f"[watch] audit_log={path}", flush=True)
+if launcher_pid is not None:
+    print(f"[watch] launcher_pid={launcher_pid}", flush=True)
+
+while not path.exists():
+    if launcher_pid is not None and not alive(launcher_pid):
+        print(f"[{stamp()}] launcher exited before audit file appeared; stopping", flush=True)
+        raise SystemExit(0)
+    time.sleep(0.5)
+    if time.monotonic() - last_emit >= heartbeat_seconds:
+        print(f"[{stamp()}] waiting for audit file; launcher_alive={alive(launcher_pid)}", flush=True)
+        last_emit = time.monotonic()
+
+with path.open("r", encoding="utf-8", errors="replace") as handle:
+    handle.seek(0)
+    while True:
+        line = handle.readline()
+        if line:
+            line = line.strip()
+            if line:
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    print(f"[{stamp()}] raw {line}", flush=True)
+                else:
+                    if summarize(record):
+                        print(f"[{stamp()}] terminal record reached; stopping watch", flush=True)
+                        raise SystemExit(0)
+            last_emit = time.monotonic()
+            continue
+        if launcher_pid is not None and not alive(launcher_pid):
+            print(f"[{stamp()}] launcher exited; stopping watch", flush=True)
+            raise SystemExit(0)
+        if time.monotonic() - last_emit >= heartbeat_seconds:
+            print(f"[{stamp()}] waiting for audit update; launcher_alive={alive(launcher_pid)}", flush=True)
+            last_emit = time.monotonic()
+        time.sleep(0.5)
+PY

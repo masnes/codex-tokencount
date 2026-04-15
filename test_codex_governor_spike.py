@@ -68,12 +68,24 @@ def base_context(overrides: dict[str, object] | None = None) -> dict[str, object
     return context
 
 
-def launcher_env(*, depth: int = 0, assume_external_sandbox: bool | None = None) -> dict[str, str]:
+def launcher_env(
+    *,
+    depth: int = 0,
+    assume_external_sandbox: bool | None = None,
+    recursion_allowed: bool | None = None,
+    recursion_budget_tokens: int | None = None,
+) -> dict[str, str]:
     env = {"CODEX_LAUNCHER_DEPTH": str(depth)}
     if assume_external_sandbox is True:
         env["CODEX_ASSUME_EXTERNAL_SANDBOX"] = "1"
     elif assume_external_sandbox is False:
         env["CODEX_ASSUME_EXTERNAL_SANDBOX"] = ""
+    if recursion_allowed is True:
+        env["CODEX_LAUNCHER_RECURSION_ALLOWED"] = "1"
+    elif recursion_allowed is False:
+        env["CODEX_LAUNCHER_RECURSION_ALLOWED"] = "0"
+    if recursion_budget_tokens is not None:
+        env["CODEX_LAUNCHER_RECURSION_BUDGET_TOKENS"] = str(recursion_budget_tokens)
     return env
 
 
@@ -579,11 +591,18 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             audit_log_path = Path(tmpdir) / "governor-audit.jsonl"
             write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
             governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
+            captured: dict[str, object] = {}
+
+            def factory(*args: object, **kwargs: object) -> FakeProcess:
+                captured["command"] = list(args[0])
+                captured["env"] = dict(kwargs.get("env") or {})
+                return FakeProcess([])
+
             launcher = BudgetedCodexLauncher(
                 governor,
                 snapshot_store=BudgetSnapshotStore(snapshot_path),
                 audit_log_path=audit_log_path,
-                process_factory=lambda *args, **kwargs: FakeProcess([]),
+                process_factory=factory,
             )
             live_store = BudgetSnapshotStore(snapshot_path)
             live_store.write({"snapshot": "live"})
@@ -605,7 +624,9 @@ class CodexGovernorSpikeTest(unittest.TestCase):
                 self.assertIn("autonomousBudget", staged)
                 self.assertEqual(staged["autonomousBudget"]["sliceLimitTokens"], 900)
                 self.assertEqual(staged["recursionPolicy"]["currentDepth"], 0)
-                self.assertFalse(staged["recursionPolicy"]["allowed"])
+                self.assertTrue(staged["recursionPolicy"]["allowed"])
+                self.assertEqual(staged["recursionPolicy"]["budgetTokens"], 225)
+                self.assertEqual(staged["recursionPolicy"]["budgetPercent"], 25)
 
                 launch_result = launcher.launch(
                     base_context({"requestSummary": "launch child"}),
@@ -631,6 +652,56 @@ class CodexGovernorSpikeTest(unittest.TestCase):
                 self.assertEqual(audit_record["prepared"]["mode"], "normal")
                 self.assertEqual(audit_record["result"]["exitCode"], 0)
                 self.assertTrue(audit_record["result"]["promotionApplied"])
+                self.assertEqual(captured["env"]["CODEX_LAUNCHER_DEPTH"], "1")
+                self.assertEqual(captured["env"]["CODEX_LAUNCHER_RECURSION_ALLOWED"], "1")
+                self.assertEqual(captured["env"]["CODEX_LAUNCHER_RECURSION_BUDGET_TOKENS"], "225")
+
+    def test_budgeted_launcher_allows_nested_launch_with_subbudget(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rollout_path = Path(tmpdir) / "rollout.jsonl"
+            snapshot_path = Path(tmpdir) / "budget-snapshot.json"
+            write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
+            governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
+            BudgetSnapshotStore(snapshot_path).write({"snapshot": "live"})
+
+            captured: dict[str, object] = {}
+
+            def factory(*args: object, **kwargs: object) -> FakeProcess:
+                captured["command"] = list(args[0])
+                captured["env"] = dict(kwargs.get("env") or {})
+                return FakeProcess([])
+
+            launcher = BudgetedCodexLauncher(
+                governor,
+                snapshot_store=BudgetSnapshotStore(snapshot_path),
+                process_factory=factory,
+            )
+
+            with patch.dict(
+                os.environ,
+                launcher_env(
+                    depth=1,
+                    assume_external_sandbox=False,
+                    recursion_allowed=True,
+                    recursion_budget_tokens=225,
+                ),
+                clear=False,
+            ):
+                result = launcher.launch(
+                    base_context({"requestSummary": "nested continuation"}),
+                    "grandchild task",
+                    percent=9,
+                    snapshot_path=snapshot_path,
+                )
+
+            self.assertNotIn("blocked", result)
+            self.assertTrue(result["recursiveLaunch"])
+            self.assertEqual(result["recursionBudgetTokens"], 225)
+            self.assertEqual(result["prepared"]["autonomousBudget"]["sliceLimitTokens"], 225)
+            self.assertFalse(result["prepared"]["recursionPolicy"]["allowed"])
+            self.assertEqual(captured["env"]["CODEX_LAUNCHER_DEPTH"], "2")
+            self.assertEqual(captured["env"]["CODEX_LAUNCHER_RECURSION_ALLOWED"], "0")
+            self.assertEqual(captured["env"]["CODEX_LAUNCHER_RECURSION_BUDGET_TOKENS"], "0")
 
     def test_budgeted_launcher_bypasses_child_sandbox_in_external_box(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -894,7 +965,7 @@ class CodexGovernorSpikeTest(unittest.TestCase):
         )
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("recursive launcher invocations are disabled", completed.stderr)
+        self.assertIn("recursive launcher sub-budget is unavailable", completed.stderr)
 
     def test_hour_run_watch_streams_existing_audit_record(self) -> None:
         repo_root = Path(__file__).resolve().parent
@@ -954,6 +1025,85 @@ sleep 1
                 )
             )
 
+    def test_watch_run_streams_existing_audit_record_without_launching(self) -> None:
+        repo_root = Path(__file__).resolve().parent
+        with TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            temp_tools = tmp_root / "tools"
+            temp_tools.mkdir()
+
+            shutil.copy2(repo_root / "tools" / "codex-watch-run", temp_tools / "codex-watch-run")
+
+            out_dir = tmp_root / "out"
+            out_dir.mkdir()
+            (out_dir / "governor-audit.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "context": {"requestSummary": "hello"},
+                                "event": "budgeted_codex_launch",
+                                "launch": {"taskPromptPreview": "hello"},
+                                "phase": "started",
+                                "prepared": {
+                                    "autonomousBudget": {"sliceLimitTokens": 10},
+                                    "blockReasons": [],
+                                    "mode": "normal",
+                                },
+                                "result": {
+                                    "blocked": False,
+                                    "exitCode": None,
+                                    "observedTokens": None,
+                                    "promotionApplied": False,
+                                    "terminatedForBudget": False,
+                                },
+                                "timestamp": "2026-04-15T00:00:00Z",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "context": {"requestSummary": "hello"},
+                                "event": "budgeted_codex_launch",
+                                "launch": {"taskPromptPreview": "hello"},
+                                "phase": "completed",
+                                "prepared": {
+                                    "autonomousBudget": {"sliceLimitTokens": 10},
+                                    "blockReasons": [],
+                                    "mode": "normal",
+                                },
+                                "result": {
+                                    "blocked": False,
+                                    "exitCode": 0,
+                                    "observedTokens": 1,
+                                    "promotionApplied": False,
+                                    "terminatedForBudget": False,
+                                },
+                                "timestamp": "2026-04-15T00:01:00Z",
+                            }
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [str(temp_tools / "codex-watch-run"), str(out_dir)],
+                cwd=str(tmp_root),
+                env=os.environ.copy(),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("[watch] audit_log=", completed.stdout)
+            self.assertIn("started mode=normal exit=None tokens=None/10 prompt=hello", completed.stdout)
+            self.assertIn("completed mode=normal exit=0 tokens=1/10 prompt=hello", completed.stdout)
+            self.assertIn("terminal record reached; stopping watch", completed.stdout)
+            self.assertNotIn("codex exec", completed.stdout)
+            self.assertNotIn("budgeted_codex_launch", completed.stderr)
+
     def test_hour_run_watch_wrapper_refuses_nested_launches(self) -> None:
         script = Path(__file__).resolve().parent / "tools" / "codex-hour-watch"
         env = os.environ.copy()
@@ -968,7 +1118,7 @@ sleep 1
         )
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("recursive launcher invocations are disabled", completed.stderr)
+        self.assertIn("recursive launcher sub-budget is unavailable", completed.stderr)
 
 
 if __name__ == "__main__":

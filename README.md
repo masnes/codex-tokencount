@@ -13,6 +13,7 @@ What this package contains:
 - `docs/codex-box.md` — separate operational note for the Podman shim.
 - `tools/codex-hour-run` — full-context launcher for a bounded next-hour run.
 - `tools/codex-hour-watch` — same launcher with live audit-tail output.
+- `tools/codex-watch-run` — watch an existing run's audit log without launching anything.
 - `tools/codex-box` — the shim itself, kept out of the repo root on purpose.
 - `sources.md` — official docs and references used to shape the package.
 
@@ -28,7 +29,7 @@ Suggested placement:
 Suggested startup pattern:
 1. Place `AGENTS.md` where Codex will auto-read it.
 2. Start Codex in the target repo.
-3. For a long run, use `./tools/codex-hour-watch "your task"` if you want live audit streaming, or `./tools/codex-hour-run "your task"` for a quieter launch; both stay under the 23% slice cap.
+3. For a long run, use `./tools/codex-hour-watch "your task"` if you want live audit streaming, or `./tools/codex-hour-run "your task"` for a quieter launch; both stay under the 23% slice cap. For an already-running box, use `./tools/codex-watch-run /path/to/_codex_out/<run>` instead.
 4. Use `docs/startup-manifest.md` when you want the cheaper compact bootstrap path first.
 5. For manual onboarding, paste `START_HERE_PROMPT.txt`.
 6. Let Codex summarize its understanding before it starts changing things.

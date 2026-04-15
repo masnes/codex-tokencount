@@ -26,7 +26,11 @@ LIVE_MODE_EMERGENCY_USED_FRACTION = 0.95
 LAUNCHER_DEPTH_ENV = "CODEX_LAUNCHER_DEPTH"
 LAUNCHER_RECURSION_ALLOWED_ENV = "CODEX_LAUNCHER_RECURSION_ALLOWED"
 LAUNCHER_RECURSION_BUDGET_ENV = "CODEX_LAUNCHER_RECURSION_BUDGET_TOKENS"
+LAUNCHER_RECURSION_SUBBUDGET_FRACTION = 0.25
+LAUNCHER_RECURSION_SUBBUDGET_PERCENT = int(round(LAUNCHER_RECURSION_SUBBUDGET_FRACTION * 100))
 LAUNCHER_RECURSION_DISABLED_REASON = "recursive launcher invocations are disabled until recursion accounting is implemented"
+LAUNCHER_RECURSION_BUDGET_EXHAUSTED_REASON = "recursive launcher sub-budget is exhausted"
+LAUNCHER_RECURSION_SUBBUDGET_REASON = "one nested launcher invocation is allowed with a reserved sub-budget"
 
 
 def _utc_now() -> str:
@@ -483,14 +487,34 @@ def _launcher_depth_from_env(env: Mapping[str, str] | None = None) -> int:
     return depth
 
 
-def _launcher_recursion_policy(depth: int) -> dict[str, Any]:
+def _launcher_recursion_state(env: Mapping[str, str] | None = None) -> tuple[bool, int]:
+    env_map = dict(os.environ if env is None else env)
+    allowed = _env_flag_enabled(env_map.get(LAUNCHER_RECURSION_ALLOWED_ENV))
+    budget_tokens = _coerce_int(env_map.get(LAUNCHER_RECURSION_BUDGET_ENV))
+    if budget_tokens is None or budget_tokens < 0:
+        budget_tokens = 0
+    return allowed, budget_tokens
+
+
+def _launcher_recursion_subbudget_tokens(slice_limit_tokens: Any) -> int | None:
+    limit = _coerce_number(slice_limit_tokens)
+    if limit is None or limit <= 0:
+        return None
+    return max(int(round(float(limit) * LAUNCHER_RECURSION_SUBBUDGET_FRACTION)), 1)
+
+
+def _launcher_recursion_policy(depth: int, *, allowed: bool, budget_tokens: int | None) -> dict[str, Any]:
+    normalized_budget = _coerce_int(budget_tokens)
+    if normalized_budget is None or normalized_budget < 0:
+        normalized_budget = 0
+    is_allowed = allowed and normalized_budget > 0
     return {
-        "allowed": False,
+        "allowed": is_allowed,
         "currentDepth": depth,
         "nextDepth": depth + 1,
-        "budgetPercent": 0,
-        "budgetTokens": 0,
-        "reason": LAUNCHER_RECURSION_DISABLED_REASON,
+        "budgetPercent": LAUNCHER_RECURSION_SUBBUDGET_PERCENT if is_allowed else 0,
+        "budgetTokens": normalized_budget if is_allowed else 0,
+        "reason": LAUNCHER_RECURSION_SUBBUDGET_REASON if is_allowed else LAUNCHER_RECURSION_DISABLED_REASON,
     }
 
 
@@ -1556,8 +1580,23 @@ class BudgetedCodexLauncher:
         snapshot_store: BudgetSnapshotStore | None = None,
     ) -> dict[str, Any]:
         prepared = self.governor.resolve_with_budget_plan(context, percent=percent, window=window)
+        current_depth = _launcher_depth_from_env() if launcher_depth is None else max(launcher_depth, 0)
+        current_recursion_allowed, current_recursion_budget_tokens = _launcher_recursion_state()
+        autonomous_budget = prepared["autonomousBudget"]
+        slice_limit_tokens = _coerce_int(autonomous_budget.get("sliceLimitTokens"))
+        if (
+            current_depth > 0
+            and current_recursion_allowed
+            and current_recursion_budget_tokens > 0
+            and slice_limit_tokens is not None
+            and current_recursion_budget_tokens < slice_limit_tokens
+        ):
+            autonomous_budget["sliceLimitTokens"] = current_recursion_budget_tokens
+        recursion_budget_tokens = _launcher_recursion_subbudget_tokens(autonomous_budget.get("sliceLimitTokens"))
         prepared["recursionPolicy"] = _launcher_recursion_policy(
-            _launcher_depth_from_env() if launcher_depth is None else max(launcher_depth, 0)
+            current_depth,
+            allowed=current_depth == 0 and recursion_budget_tokens is not None,
+            budget_tokens=recursion_budget_tokens if current_depth == 0 else 0,
         )
         store = snapshot_store if snapshot_store is not None else self.snapshot_store
         if store is not None:
@@ -1632,6 +1671,7 @@ class BudgetedCodexLauncher:
         audit_log_path: str | Path | None = None,
     ) -> dict[str, Any]:
         current_depth = _launcher_depth_from_env()
+        current_recursion_allowed, current_recursion_budget_tokens = _launcher_recursion_state()
         store = self._resolve_snapshot_store(snapshot_path)
         audit_store = self._resolve_audit_log_store(
             audit_log_path,
@@ -1649,32 +1689,64 @@ class BudgetedCodexLauncher:
         slice_limit_tokens = _coerce_int(autonomous_budget.get("sliceLimitTokens"))
         recursion_policy = prepared["recursionPolicy"]
         if current_depth > 0:
-            result = {
-                "prepared": prepared,
-                "command": None,
-                "terminatedForBudget": False,
-                "blocked": True,
-                "reason": recursion_policy["reason"],
-                "recursionPolicy": recursion_policy,
-            }
-            if store is not None:
-                result["snapshotPath"] = str(store.path)
-                result["stagedSnapshotPath"] = prepared.get("stagedSnapshotPath")
-            elif snapshot_path is not None:
-                result["snapshotPath"] = str(Path(snapshot_path))
-            self._append_launch_audit(
-                audit_store,
-                context=context,
-                task_prompt=task_prompt,
-                prepared=prepared,
-                result=result,
-                command=None,
-                workdir=workdir,
-                model=model,
-                output_last_message=output_last_message,
-                extra_args=extra_args,
-            )
-            return result
+            if not current_recursion_allowed:
+                result = {
+                    "prepared": prepared,
+                    "command": None,
+                    "terminatedForBudget": False,
+                    "blocked": True,
+                    "reason": LAUNCHER_RECURSION_DISABLED_REASON,
+                    "recursionPolicy": recursion_policy,
+                    "recursiveLaunch": True,
+                    "recursionBudgetTokens": current_recursion_budget_tokens,
+                }
+                if store is not None:
+                    result["snapshotPath"] = str(store.path)
+                    result["stagedSnapshotPath"] = prepared.get("stagedSnapshotPath")
+                elif snapshot_path is not None:
+                    result["snapshotPath"] = str(Path(snapshot_path))
+                self._append_launch_audit(
+                    audit_store,
+                    context=context,
+                    task_prompt=task_prompt,
+                    prepared=prepared,
+                    result=result,
+                    command=None,
+                    workdir=workdir,
+                    model=model,
+                    output_last_message=output_last_message,
+                    extra_args=extra_args,
+                )
+                return result
+            if current_recursion_budget_tokens <= 0:
+                result = {
+                    "prepared": prepared,
+                    "command": None,
+                    "terminatedForBudget": False,
+                    "blocked": True,
+                    "reason": LAUNCHER_RECURSION_BUDGET_EXHAUSTED_REASON,
+                    "recursionPolicy": recursion_policy,
+                    "recursiveLaunch": True,
+                    "recursionBudgetTokens": current_recursion_budget_tokens,
+                }
+                if store is not None:
+                    result["snapshotPath"] = str(store.path)
+                    result["stagedSnapshotPath"] = prepared.get("stagedSnapshotPath")
+                elif snapshot_path is not None:
+                    result["snapshotPath"] = str(Path(snapshot_path))
+                self._append_launch_audit(
+                    audit_store,
+                    context=context,
+                    task_prompt=task_prompt,
+                    prepared=prepared,
+                    result=result,
+                    command=None,
+                    workdir=workdir,
+                    model=model,
+                    output_last_message=output_last_message,
+                    extra_args=extra_args,
+                )
+                return result
         if slice_limit_tokens is None:
             result = {
                 "prepared": prepared,
@@ -1702,8 +1774,8 @@ class BudgetedCodexLauncher:
 
         child_env = os.environ.copy()
         child_env[LAUNCHER_DEPTH_ENV] = str(current_depth + 1)
-        child_env[LAUNCHER_RECURSION_ALLOWED_ENV] = "0"
-        child_env[LAUNCHER_RECURSION_BUDGET_ENV] = "0"
+        child_env[LAUNCHER_RECURSION_ALLOWED_ENV] = "1" if recursion_policy["allowed"] else "0"
+        child_env[LAUNCHER_RECURSION_BUDGET_ENV] = str(recursion_policy["budgetTokens"] or 0)
         command = self.build_command(
             prepared,
             task_prompt,
@@ -1825,6 +1897,8 @@ class BudgetedCodexLauncher:
             "recursionPolicy": recursion_policy,
             "snapshotPath": str(store.path) if store is not None else (str(Path(snapshot_path)) if snapshot_path is not None else None),
             "stagedSnapshotPath": prepared.get("stagedSnapshotPath"),
+            "recursiveLaunch": current_depth > 0,
+            "recursionBudgetTokens": current_recursion_budget_tokens if current_depth > 0 else None,
         }
 
         if store is not None and exit_code == 0 and not terminated_for_budget:

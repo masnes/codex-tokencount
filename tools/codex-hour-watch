@@ -14,6 +14,7 @@ Behavior:
   - Launches the 23% hour-run wrapper in the background.
   - Follows the structured audit trail and mirrored text log with timestamped summaries and heartbeats.
   - Stops following when the launcher exits.
+  - Allows one nested continuation when the current process carries a recursion sub-budget; otherwise fails closed.
 USAGE
 }
 
@@ -51,8 +52,18 @@ launcher_depth="${CODEX_LAUNCHER_DEPTH:-0}"
 if ! [[ "$launcher_depth" =~ ^[0-9]+$ ]]; then
   launcher_depth=0
 fi
-if (( launcher_depth > 0 )); then
-  echo "Refusing nested hour-run launch at CODEX_LAUNCHER_DEPTH=$launcher_depth; recursive launcher invocations are disabled until recursion accounting is implemented." >&2
+recursion_allowed="${CODEX_LAUNCHER_RECURSION_ALLOWED:-0}"
+recursion_budget_tokens="${CODEX_LAUNCHER_RECURSION_BUDGET_TOKENS:-0}"
+if ! [[ "$recursion_budget_tokens" =~ ^[0-9]+$ ]]; then
+  recursion_budget_tokens=0
+fi
+if [[ ! "$recursion_allowed" =~ ^(1|true|TRUE|yes|YES|on|ON)$ ]]; then
+  recursion_allowed=0
+else
+  recursion_allowed=1
+fi
+if (( launcher_depth > 0 )) && (( recursion_allowed == 0 || recursion_budget_tokens <= 0 )); then
+  echo "Refusing nested hour-run launch at CODEX_LAUNCHER_DEPTH=$launcher_depth; recursive launcher sub-budget is unavailable." >&2
   exit 1
 fi
 

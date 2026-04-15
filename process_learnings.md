@@ -14,3 +14,5 @@
 - If one tailer writes a derived log for another tailer, key the downstream exit condition to the producer of the derived file, not the original launcher. Otherwise the final terminal line can be missed during shutdown.
 - Prompt text can request continuation, but it cannot guarantee a full-hour run. If wall-clock duration matters, the host has to enforce relaunch or deadline behavior; prompt wording alone is advisory.
 - Telemetry is not a substitute for durable work. If the goal is to preserve actual changes, make git checkpoint or commit boundaries explicit instead of relying on audit artifacts alone.
+- A recursion sub-budget is only useful if the launcher hands the cap through env and audit records; otherwise "nested launch" is just a Boolean gate with extra steps.
+- A watch-only audit helper is worth keeping around because it lets you inspect an already-running box without paying a fresh launch cost.

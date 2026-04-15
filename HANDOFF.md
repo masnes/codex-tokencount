@@ -36,7 +36,7 @@ Use these when the space is genuinely uncertain or identity-relevant:
 - If the workspace becomes confusing, consolidate before adding more outputs.
 - Treat a full-workspace "read everything and summarize" run as a bootstrap audit. It is useful for measuring friction, but it is too expensive to repeat casually, so prefer a compact startup manifest plus targeted reads for normal launches.
 - If you do pay the bootstrap cost, record the measured token burn and promote the lesson into `process_learnings.md`, `codex_budget_policy.md`, or this handoff instead of re-learning it in the next run.
-- For the next-hour mode, use `tools/codex-hour-watch` if you want live audit tailing, or `tools/codex-hour-run` for a quieter launch; both stay under the 23% slice cap.
+- For the next-hour mode, use `tools/codex-hour-watch` if you want live audit tailing, or `tools/codex-hour-run` for a quieter launch; both stay under the 23% slice cap. For an already-running job, use `tools/codex-watch-run` so you do not trigger a fresh launch.
 
 ## Current active interests / workstreams
 ### 1) Codex / agent workflow design
@@ -58,7 +58,7 @@ Recommended implementation shape:
 - Wrapper tracks per-turn usage from `codex exec --json` logs and the rollout JSONL stream.
 - Wrapper injects budget state into Codex via prompt or hooks, and should derive the interactive policy plus the child-agent slice from the same usage snapshot. In code, prefer a single `resolve_with_budget_plan(...)` call when you need both.
 - For child work, materialize the snapshot to disk, launch a bounded `codex exec` child with that snapshot, then refresh the snapshot after the run if it passed tests.
-- Recursive launcher calls are currently banned; child runs carry depth metadata and nested launcher invocations must fail closed until recursion accounting is implemented.
+- Recursive launcher calls are gated by a one-step recursion sub-budget; child runs carry depth metadata and nested launcher invocations must fail closed when the sub-budget is absent or exhausted.
 - Hook / wrapper enforces behavior changes: no subagents, no broad scans, no giant context ingestion in constrained mode.
 - For launcher runs inside `tools/codex-box`, the intended defaults are `CODEX_ASSUME_EXTERNAL_SANDBOX=1`, `model = "gpt-5.4-mini"`, and `model_reasoning_effort = "xhigh"` in a fresh box config.
 

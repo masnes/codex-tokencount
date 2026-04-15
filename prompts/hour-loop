@@ -26,8 +26,8 @@
   - Make one durable git-backed improvement per cycle when possible.
   - Prefer changes that increase audit fidelity, especially evidence of actual text changes.
   - Before ending a cycle, inspect `git diff --stat` and `git diff` so the run can explain what changed in text, not just that something ran.
-  - If the run reveals that relaunching would be needed to keep going, prefer queueing the next improvement inside this same prompt instead of doing a host relaunch.
-  - Queue a code follow-up to add recursion with a sub-budget so future runs can continue without paying a full relaunch tax.
+  - If the run reveals that a follow-up launch would help and the recursion sub-budget is available, prefer using that path instead of doing a host relaunch.
+  - If the recursion sub-budget is exhausted, queue the next improvement inside this same prompt instead of relaunching the host.
   - If there is a meaningful diff, stage, `git add`, and commit the code to git before stopping.
   - If there is no meaningful diff, explain why and leave the tree unchanged.
 
@@ -54,6 +54,6 @@
   Task:
   Improve the Codex governor / hour-run workflow for future long runs. Choose the highest-value remaining issue from the live repo state, make
   a small auditable git-backed change, verify it, and then keep iterating on the next-best follow-up. Prioritize improving audit capture of
-  text changes and the ability to continue work without a relaunch. If a code-path improvement to recursive sub-budgets is the best next
-  move, queue that up and make it part of the work. Use the full hour unless truly satisficed. If a better follow-up appears, pivot to it.
-  Continue until the work is genuinely good enough or the hour/budget ends, then commit the code to git.
+  text changes and the ability to continue work via the recursion sub-budget without a relaunch. Use the full hour unless truly satisficed.
+  If a better follow-up appears, pivot to it. Continue until the work is genuinely good enough or the hour/budget ends, then commit the code
+  to git.
