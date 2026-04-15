@@ -54,6 +54,7 @@ Recommended implementation shape:
 - Wrapper reads `/status` externally when possible, otherwise uses the local session telemetry files.
 - Wrapper tracks per-turn usage from `codex exec --json` logs and the rollout JSONL stream.
 - Wrapper injects budget state into Codex via prompt or hooks, and should derive the interactive policy plus the child-agent slice from the same usage snapshot. In code, prefer a single `resolve_with_budget_plan(...)` call when you need both.
+- For child work, materialize the snapshot to disk, launch a bounded `codex exec` child with that snapshot, then refresh the snapshot after the run if it passed tests.
 - Hook / wrapper enforces behavior changes: no subagents, no broad scans, no giant context ingestion in constrained mode.
 
 ### 2) Security-conscious Codex box setup

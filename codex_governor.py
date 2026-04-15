@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -402,6 +404,54 @@ def _autonomous_budget_from_usage_snapshot(usage: dict[str, Any], percent: int =
         "warnings": usage.get("warnings", []),
     }
     return strip_none(result)
+
+
+def _token_count_payload_total_tokens(payload: Any) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+    total_usage = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else {}
+    total_tokens = _coerce_number(total_usage.get("total_tokens"))
+    if total_tokens is None:
+        last_usage = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
+        total_tokens = _coerce_number(last_usage.get("total_tokens"))
+    return _coerce_int(total_tokens)
+
+
+def _event_json_from_line(line: str) -> dict[str, Any] | None:
+    stripped = line.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
+def _json_event_payload(event: dict[str, Any]) -> dict[str, Any] | None:
+    if _coerce_str(event.get("type")) == "token_count":
+        return event
+    payload = event.get("payload")
+    if isinstance(payload, dict) and _coerce_str(event.get("type")) == "event_msg" and _coerce_str(payload.get("type")) == "token_count":
+        return payload
+    return None
+
+
+def _budget_snapshot_prompt_block(snapshot: dict[str, Any]) -> str:
+    return json.dumps(strip_none(snapshot), indent=2, sort_keys=True)
+
+
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(path.parent), delete=False) as handle:
+        temp_path = Path(handle.name)
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    temp_path.replace(path)
 
 
 def _normalize_window(window: Any, fallback_start: str | None = None) -> dict[str, Any]:
@@ -1354,6 +1404,238 @@ class CodexGovernor:
 BudgetGovernor = CodexGovernor
 
 
+class BudgetSnapshotStore:
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+
+    def read(self) -> dict[str, Any] | None:
+        if not self.path.exists():
+            return None
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def write(self, payload: dict[str, Any]) -> Path:
+        _write_json_atomic(self.path, payload)
+        return self.path
+
+    def replace(self, payload: dict[str, Any]) -> Path:
+        return self.write(payload)
+
+
+class BudgetedCodexLauncher:
+    def __init__(
+        self,
+        governor: CodexGovernor | None = None,
+        *,
+        snapshot_store: BudgetSnapshotStore | str | Path | None = None,
+        process_factory: Any = subprocess.Popen,
+    ):
+        self.governor = governor or CodexGovernor.from_environment()
+        if snapshot_store is None or isinstance(snapshot_store, BudgetSnapshotStore):
+            self.snapshot_store = snapshot_store
+        else:
+            self.snapshot_store = BudgetSnapshotStore(snapshot_store)
+        self.process_factory = process_factory
+
+    def prepare(
+        self,
+        context: dict[str, Any],
+        *,
+        percent: int = 9,
+        window: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        prepared = self.governor.resolve_with_budget_plan(context, percent=percent, window=window)
+        if self.snapshot_store is not None:
+            self.snapshot_store.write(prepared)
+        return prepared
+
+    def build_prompt(self, prepared: dict[str, Any], task_prompt: str) -> str:
+        snapshot_block = _budget_snapshot_prompt_block(
+            {
+                "mode": prepared["decision"]["mode"],
+                "status": prepared["status"],
+                "usage": prepared["usage"],
+                "autonomousBudget": prepared["autonomousBudget"],
+                "directives": prepared["decision"]["requiredBehaviors"],
+            }
+        )
+        return "\n".join(
+            [
+                "Budget workflow snapshot (data only):",
+                snapshot_block,
+                "",
+                "Task:",
+                task_prompt.strip(),
+            ]
+        ).strip()
+
+    def build_command(
+        self,
+        prepared: dict[str, Any],
+        task_prompt: str,
+        *,
+        workdir: str | Path | None = None,
+        model: str | None = None,
+        output_last_message: str | Path | None = None,
+        extra_args: Sequence[str] | None = None,
+    ) -> list[str]:
+        command = ["codex", "exec", "--json", "--full-auto"]
+        if workdir is not None:
+            command.extend(["-C", str(workdir)])
+        if model is not None:
+            command.extend(["-m", model])
+        if output_last_message is not None:
+            command.extend(["--output-last-message", str(output_last_message)])
+        if extra_args:
+            command.extend([str(item) for item in extra_args])
+        command.append(self.build_prompt(prepared, task_prompt))
+        return command
+
+    def launch(
+        self,
+        context: dict[str, Any],
+        task_prompt: str,
+        *,
+        percent: int = 9,
+        window: dict[str, Any] | None = None,
+        workdir: str | Path | None = None,
+        model: str | None = None,
+        output_last_message: str | Path | None = None,
+        extra_args: Sequence[str] | None = None,
+        snapshot_path: str | Path | None = None,
+    ) -> dict[str, Any]:
+        prepared = self.prepare(context, percent=percent, window=window)
+        autonomous_budget = prepared["autonomousBudget"]
+        slice_limit_tokens = _coerce_int(autonomous_budget.get("sliceLimitTokens"))
+        if slice_limit_tokens is None:
+            return {
+                "prepared": prepared,
+                "command": None,
+                "terminatedForBudget": False,
+                "blocked": True,
+                "reason": "autonomous slice limit is unavailable",
+            }
+
+        store = self._resolve_snapshot_store(snapshot_path)
+        if store is not None:
+            store.write(prepared)
+
+        command = self.build_command(
+            prepared,
+            task_prompt,
+            workdir=workdir,
+            model=model,
+            output_last_message=output_last_message,
+            extra_args=extra_args,
+        )
+
+        process = self.process_factory(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        observed_tokens: int | None = None
+        observed_usage: dict[str, Any] | None = None
+        terminated_for_budget = False
+
+        stdout = getattr(process, "stdout", None)
+        if stdout is not None:
+            for raw_line in stdout:
+                line = raw_line.rstrip("\n")
+                stdout_lines.append(line)
+                event = _event_json_from_line(line)
+                payload = _json_event_payload(event) if event is not None else None
+                if payload is None:
+                    continue
+                observed_tokens = _token_count_payload_total_tokens(payload)
+                if observed_tokens is not None:
+                    observed_usage = normalize_usage_snapshot(
+                        {
+                            "provider": "child-exec",
+                            "capturedAt": _coerce_str(event.get("timestamp")) or _utc_now(),
+                            "state": "ok",
+                            "confidence": "high",
+                            "estimatesOnly": True,
+                            "window": {"kind": "session", "startAt": _coerce_str(event.get("timestamp")) or _utc_now()},
+                            "budgets": {
+                                "five_hour_window": {
+                                    "key": "five_hour_window",
+                                    "unit": "tokens",
+                                    "used": observed_tokens,
+                                    "limit": slice_limit_tokens,
+                                    "remaining": max(slice_limit_tokens - observed_tokens, 0),
+                                }
+                            },
+                            "sourceFiles": [],
+                            "warnings": [],
+                        }
+                    )
+                    if observed_tokens >= slice_limit_tokens:
+                        terminated_for_budget = True
+                        terminate = getattr(process, "terminate", None)
+                        if callable(terminate):
+                            terminate()
+                        break
+
+        wait = getattr(process, "wait", None)
+        if callable(wait):
+            try:
+                exit_code = wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                kill = getattr(process, "kill", None)
+                if callable(kill):
+                    kill()
+                exit_code = wait(timeout=5) if callable(wait) else None
+        else:
+            exit_code = getattr(process, "returncode", None)
+
+        if stdout is not None:
+            remainder = stdout.read()
+            if remainder:
+                for line in remainder.splitlines():
+                    stdout_lines.append(line)
+        stderr = getattr(process, "stderr", None)
+        if stderr is not None:
+            stderr_text = stderr.read()
+            if stderr_text:
+                stderr_lines.extend(stderr_text.splitlines())
+
+        result = {
+            "prepared": prepared,
+            "command": command,
+            "terminatedForBudget": terminated_for_budget,
+            "observedTokens": observed_tokens,
+            "observedUsage": observed_usage,
+            "exitCode": exit_code,
+            "stdout": stdout_lines,
+            "stderr": stderr_lines,
+            "autonomousBudget": autonomous_budget,
+        }
+
+        if store is not None:
+            refreshed = self.governor.resolve_with_budget_plan(context, percent=percent, window=window)
+            store.replace(refreshed)
+            result["refreshedSnapshot"] = refreshed
+            result["snapshotPath"] = str(store.path)
+        elif snapshot_path is not None:
+            result["snapshotPath"] = str(Path(snapshot_path))
+
+        return result
+
+    def _resolve_snapshot_store(self, snapshot_path: str | Path | None) -> BudgetSnapshotStore | None:
+        if snapshot_path is not None:
+            return BudgetSnapshotStore(snapshot_path)
+        return self.snapshot_store
+
+
 def build_status_provider(
     env: Mapping[str, str] | None = None,
     *,
@@ -1578,6 +1860,8 @@ if __name__ == "__main__":
 
 __all__ = [
     "BudgetGovernor",
+    "BudgetSnapshotStore",
+    "BudgetedCodexLauncher",
     "CodexGovernor",
     "FileStatusProvider",
     "JsonlUsageProvider",

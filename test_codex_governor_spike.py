@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import unittest
 from pathlib import Path
@@ -7,6 +8,8 @@ from tempfile import TemporaryDirectory
 
 from codex_governor import (
     BudgetGovernor,
+    BudgetSnapshotStore,
+    BudgetedCodexLauncher,
     FileStatusProvider,
     JsonlUsageProvider,
     PolicyEngine,
@@ -140,6 +143,26 @@ def write_rollout(path: Path, *, used_percent: float, total_tokens: int, weekly_
         ),
         encoding="utf-8",
     )
+
+
+class FakeProcess:
+    def __init__(self, lines: list[str]):
+        self.stdout = io.StringIO("\n".join(lines) + "\n")
+        self.stderr = io.StringIO("")
+        self.returncode = 0
+        self.terminated = False
+        self.killed = False
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
 
 
 class CodexGovernorSpikeTest(unittest.TestCase):
@@ -455,6 +478,91 @@ class CodexGovernorSpikeTest(unittest.TestCase):
             self.assertEqual(plan["estimatedFiveHourLimitTokens"], 10000)
             self.assertEqual(plan["sliceLimitTokens"], 1000)
             self.assertEqual(plan["fiveHourResetAt"], "2026-04-14T23:46:19Z")
+
+    def test_budgeted_launcher_writes_snapshot_and_builds_command(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rollout_path = Path(tmpdir) / "rollout.jsonl"
+            snapshot_path = Path(tmpdir) / "budget-snapshot.json"
+            write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
+            governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
+            launcher = BudgetedCodexLauncher(governor, snapshot_store=BudgetSnapshotStore(snapshot_path), process_factory=lambda *args, **kwargs: FakeProcess([]))
+
+            prepared = launcher.prepare(base_context({"requestSummary": "launch child"}), percent=9)
+            command = launcher.build_command(prepared, "child task", workdir=Path(tmpdir), model="gpt-5.4-mini")
+
+            self.assertEqual(command[0:3], ["codex", "exec", "--json"])
+            self.assertIn("--full-auto", command)
+            self.assertIn("-C", command)
+            self.assertIn("child task", command[-1])
+            self.assertTrue(snapshot_path.exists())
+            stored = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertIn("autonomousBudget", stored)
+            self.assertEqual(stored["autonomousBudget"]["sliceLimitTokens"], 900)
+
+    def test_budgeted_launcher_stops_child_at_slice_limit(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rollout_path = Path(tmpdir) / "rollout.jsonl"
+            snapshot_path = Path(tmpdir) / "budget-snapshot.json"
+            write_rollout(rollout_path, used_percent=40.0, total_tokens=4000)
+            governor = BudgetGovernor.from_environment({"CODEX_ROLLOUT_FILE": str(rollout_path)})
+
+            child_lines = [
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-14T18:40:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {"total_tokens": 400},
+                                "last_token_usage": {"total_tokens": 400},
+                            },
+                            "rate_limits": {"primary": {"used_percent": 4.0}},
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-14T18:41:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {"total_tokens": 950},
+                                "last_token_usage": {"total_tokens": 950},
+                            },
+                            "rate_limits": {"primary": {"used_percent": 9.5}},
+                        },
+                    }
+                ),
+            ]
+
+            fake_process = FakeProcess(child_lines)
+
+            def factory(*args: object, **kwargs: object) -> FakeProcess:
+                return fake_process
+
+            launcher = BudgetedCodexLauncher(
+                governor,
+                snapshot_store=BudgetSnapshotStore(snapshot_path),
+                process_factory=factory,
+            )
+
+            result = launcher.launch(
+                base_context({"requestSummary": "child work"}),
+                "child task",
+                percent=9,
+                snapshot_path=snapshot_path,
+            )
+
+            self.assertTrue(fake_process.terminated)
+            self.assertTrue(result["terminatedForBudget"])
+            self.assertEqual(result["observedTokens"], 950)
+            self.assertEqual(result["autonomousBudget"]["sliceLimitTokens"], 900)
+            self.assertEqual(result["exitCode"], -15)
+            self.assertTrue(snapshot_path.exists())
+            refreshed = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertIn("autonomousBudget", refreshed)
 
 
 if __name__ == "__main__":

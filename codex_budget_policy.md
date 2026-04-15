@@ -81,3 +81,4 @@ Policy: no subagents; no repo-wide scans; prefer targeted grep/read; use gpt-5.4
 - Escalate to larger model / more reasoning only when the expected value is clearly positive.
 - For autonomous agents, reserve a fixed slice of the estimated five-hour allowance and stop the child session at that slice limit.
 - Use one live usage snapshot to decide both the current turn policy and the child-agent slice so the numbers do not drift between reads.
+- When launching a child agent, write the snapshot first, use it as the prompt policy block, then refresh the snapshot after the run.
