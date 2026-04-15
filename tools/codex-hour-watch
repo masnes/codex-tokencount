@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  ./tools/codex-hour-watch [PROMPT]
+
+Examples:
+  ./tools/codex-hour-watch "Continue the governor work for the next hour."
+  printf '%s\n' "Continue the governor work for the next hour." | ./tools/codex-hour-watch
+
+Behavior:
+  - Launches the 23% hour-run wrapper in the background.
+  - Follows the structured audit trail and mirrored text log with timestamped summaries and heartbeats.
+  - Stops following when the launcher exits.
+USAGE
+}
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+run_script="$repo_root/tools/codex-hour-run"
+
+if [[ ! -x "$run_script" ]]; then
+  echo "Missing or non-executable launcher: $run_script" >&2
+  exit 1
+fi
+
+if (($# == 0)); then
+  if [[ -t 0 ]]; then
+    usage
+    exit 2
+  fi
+  task_prompt="$(cat)"
+else
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+  esac
+  task_prompt="$*"
+fi
+
+if [[ -z "${task_prompt//[[:space:]]/}" ]]; then
+  usage
+  exit 2
+fi
+
+launcher_depth="${CODEX_LAUNCHER_DEPTH:-0}"
+if ! [[ "$launcher_depth" =~ ^[0-9]+$ ]]; then
+  launcher_depth=0
+fi
+if (( launcher_depth > 0 )); then
+  echo "Refusing nested hour-run launch at CODEX_LAUNCHER_DEPTH=$launcher_depth; recursive launcher invocations are disabled until recursion accounting is implemented." >&2
+  exit 1
+fi
+
+run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+out_dir="${CODEX_OUT:-$repo_root/_codex_out/hour-watch/$run_id}"
+mkdir -p "$out_dir"
+audit_log="$out_dir/governor-audit.jsonl"
+audit_text_log="$out_dir/governor-audit-text.jsonl"
+
+tail_audit() {
+  exec python - "$audit_log" "$audit_text_log" "${1:-}" <<'PY'
+import json
+import os
+import pathlib
+import sys
+import time
+from datetime import datetime, timezone
+
+path = pathlib.Path(sys.argv[1])
+text_path = pathlib.Path(sys.argv[2])
+launch_pid = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
+heartbeat_seconds = 15
+last_emit = time.monotonic()
+audit_event_source = "codex-hour-watch"
+
+
+def stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def alive(pid: int | None) -> bool | None:
+    if pid is None:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def append_audit_text(text: str, *, kind: str, source_record: dict[str, object] | None = None) -> None:
+    payload: dict[str, object] = {
+        "timestamp": stamp(),
+        "event": "audit_text",
+        "source": audit_event_source,
+        "kind": kind,
+        "text": text,
+    }
+    if source_record is not None:
+        payload["sourceEvent"] = source_record.get("event")
+        payload["sourcePhase"] = source_record.get("phase")
+        payload["sourceTimestamp"] = source_record.get("timestamp")
+    try:
+        with text_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, separators=(",", ":")))
+            handle.write("\n")
+    except OSError:
+        pass
+
+
+def summarize(record: dict[str, object]) -> None:
+    prepared = record.get("prepared") or {}
+    result = record.get("result") or {}
+    launch = record.get("launch") or {}
+    context = record.get("context") or {}
+    autonomous_budget = prepared.get("autonomousBudget") or {}
+    phase = str(record.get("phase") or "?")
+    mode = str(prepared.get("mode") or "?")
+    exit_code = result.get("exitCode")
+    observed = result.get("observedTokens")
+    slice_limit = autonomous_budget.get("sliceLimitTokens")
+    prompt = launch.get("taskPromptPreview") or context.get("requestSummary") or ""
+    prompt = " ".join(str(prompt).split())
+    if len(prompt) > 96:
+        prompt = prompt[:93] + "..."
+    flags: list[str] = []
+    if result.get("blocked"):
+        flags.append("blocked")
+    if result.get("terminatedForBudget"):
+        flags.append("budget-stop")
+    if result.get("promotionApplied"):
+        flags.append("promoted")
+    if prepared.get("blockReasons"):
+        flags.append(f"blocks={len(prepared.get('blockReasons') or [])}")
+    suffix = f" {' '.join(flags)}" if flags else ""
+    append_audit_text(
+        f"[{stamp()}] {phase} mode={mode} exit={exit_code} "
+        f"tokens={observed}/{slice_limit}{suffix} prompt={prompt}",
+        kind="summary",
+        source_record=record,
+    )
+
+
+append_audit_text(f"[{stamp()}] watching {path}", kind="status")
+while not path.exists():
+    if launch_pid is not None and not alive(launch_pid):
+        append_audit_text(f"[{stamp()}] launcher exited before audit file appeared; stopping", kind="terminal")
+        raise SystemExit(0)
+    time.sleep(0.5)
+    if time.monotonic() - last_emit >= heartbeat_seconds:
+        append_audit_text(f"[{stamp()}] waiting for audit file; launcher_alive={alive(launch_pid)}", kind="heartbeat")
+        last_emit = time.monotonic()
+
+with path.open("r", encoding="utf-8", errors="replace") as handle:
+    # Read from the start so we do not miss the launch record if the file
+    # already exists by the time the watcher opens it.
+    handle.seek(0)
+    while True:
+        line = handle.readline()
+        if line:
+            line = line.strip()
+            if line:
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    append_audit_text(f"[{stamp()}] raw {line}", kind="raw")
+                else:
+                    if record.get("event") == "audit_text":
+                        last_emit = time.monotonic()
+                        continue
+                    summarize(record)
+            last_emit = time.monotonic()
+            continue
+        if launch_pid is not None and not alive(launch_pid):
+            append_audit_text(f"[{stamp()}] launcher exited; stopping audit tail", kind="terminal")
+            raise SystemExit(0)
+        if time.monotonic() - last_emit >= heartbeat_seconds:
+            append_audit_text(f"[{stamp()}] waiting for audit update; launcher_alive={alive(launch_pid)}", kind="heartbeat")
+            last_emit = time.monotonic()
+        time.sleep(0.5)
+PY
+}
+
+tail_text() {
+  exec python - "$audit_text_log" "${1:-}" <<'PY'
+import json
+import os
+import pathlib
+import sys
+import time
+from datetime import datetime, timezone
+
+path = pathlib.Path(sys.argv[1])
+producer_pid = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else None
+heartbeat_seconds = 15
+last_emit = time.monotonic()
+
+
+def stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def alive(pid: int | None) -> bool | None:
+    if pid is None:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def relay(record: dict[str, object]) -> None:
+    if record.get("event") != "audit_text":
+        return
+    text = record.get("text")
+    if text is None:
+        return
+    print(str(text), flush=True)
+
+
+while not path.exists():
+    if producer_pid is not None and not alive(producer_pid):
+        raise SystemExit(0)
+    time.sleep(0.5)
+    if time.monotonic() - last_emit >= heartbeat_seconds:
+        last_emit = time.monotonic()
+
+with path.open("r", encoding="utf-8", errors="replace") as handle:
+    handle.seek(0)
+    while True:
+        line = handle.readline()
+        if line:
+            line = line.strip()
+            if line:
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                relay(record)
+                if record.get("kind") == "terminal":
+                    raise SystemExit(0)
+            last_emit = time.monotonic()
+            continue
+        if producer_pid is not None and not alive(producer_pid):
+            raise SystemExit(0)
+        if time.monotonic() - last_emit >= heartbeat_seconds:
+            last_emit = time.monotonic()
+        time.sleep(0.5)
+PY
+}
+
+cleanup() {
+  if [[ -n "${launch_pid:-}" ]]; then
+    kill "$launch_pid" 2>/dev/null || true
+  fi
+  if [[ -n "${audit_tail_pid:-}" ]]; then
+    kill "$audit_tail_pid" 2>/dev/null || true
+  fi
+  if [[ -n "${text_tail_pid:-}" ]]; then
+    kill "$text_tail_pid" 2>/dev/null || true
+  fi
+}
+
+trap 'cleanup; exit 130' INT TERM HUP
+
+echo "[watch] out_dir=$out_dir"
+echo "[watch] audit_log=$audit_log"
+echo "[watch] audit_text_log=$audit_text_log"
+
+touch "$audit_text_log"
+CODEX_OUT="$out_dir" "$run_script" "$task_prompt" &
+launch_pid=$!
+
+tail_audit "$launch_pid" &
+audit_tail_pid=$!
+
+tail_text "$audit_tail_pid" >&2 &
+text_tail_pid=$!
+
+if wait "$launch_pid"; then
+  launch_status=0
+else
+  launch_status=$?
+fi
+
+wait "$audit_tail_pid" 2>/dev/null || true
+wait "$text_tail_pid" 2>/dev/null || true
+exit "$launch_status"

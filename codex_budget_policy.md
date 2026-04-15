@@ -83,3 +83,10 @@ Policy: no subagents; no repo-wide scans; prefer targeted grep/read; use gpt-5.4
 - Use one live usage snapshot to decide both the current turn policy and the child-agent slice so the numbers do not drift between reads.
 - When launching a child agent, write the snapshot first, use it as the prompt policy block, then refresh the snapshot after the run.
 - Recursive launcher calls are banned until explicit recursion-budget accounting exists.
+
+## Bootstrap / startup reads
+- Treat "read the workspace into context, then summarize" as a bootstrap or audit operation, not the default launcher path.
+- A measured full-intake run can consume a large fixed cost even when the result is just a summary; avoid repeating it casually.
+- Prefer `docs/startup-manifest.md` for the compact bootstrap path when you just need orientation.
+- Use `tools/codex-hour-watch` as the canonical full-context hour-task wrapper when you want live audit streaming; use `tools/codex-hour-run` for the quieter variant. Both read the full workspace context and cap the child at 23% of the estimated five-hour allowance.
+- If you do a bootstrap read, keep it to one pass, produce one concise summary, and record the token cost so the lesson becomes reusable, ideally in `process_learnings.md`.

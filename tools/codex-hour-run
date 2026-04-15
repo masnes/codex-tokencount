@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  ./tools/codex-hour-run [PROMPT]
+
+Examples:
+  ./tools/codex-hour-run "Continue the governor work for the next hour."
+  printf '%s\n' "Continue the governor work for the next hour." | ./tools/codex-hour-run
+
+Behavior:
+  - Reads the full workspace context first, then targeted files as needed.
+  - Keeps the child launch capped at 23% of the estimated five-hour allowance.
+  - Uses the existing governor/audit/snapshot plumbing so the run stays measurable.
+  - Refuses nested launches when CODEX_LAUNCHER_DEPTH is already nonzero.
+USAGE
+}
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+manifest_path="$repo_root/docs/startup-manifest.md"
+
+if [[ ! -f "$manifest_path" ]]; then
+  echo "Missing startup manifest: $manifest_path" >&2
+  exit 1
+fi
+
+if (($# == 0)); then
+  if [[ -t 0 ]]; then
+    usage
+    exit 2
+  fi
+  task_prompt="$(cat)"
+else
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+  esac
+  task_prompt="$*"
+fi
+
+if [[ -z "${task_prompt//[[:space:]]/}" ]]; then
+  usage
+  exit 2
+fi
+
+launcher_depth="${CODEX_LAUNCHER_DEPTH:-0}"
+if ! [[ "$launcher_depth" =~ ^[0-9]+$ ]]; then
+  launcher_depth=0
+fi
+if (( launcher_depth > 0 )); then
+  echo "Refusing nested hour-run launch at CODEX_LAUNCHER_DEPTH=$launcher_depth; recursive launcher invocations are disabled until recursion accounting is implemented." >&2
+  exit 1
+fi
+
+out_dir="${CODEX_OUT:-$repo_root/_codex_out/hour-run}"
+mkdir -p "$out_dir"
+
+wrapped_prompt=$(
+  cat <<EOF
+Read and understand the full workspace context before doing any task work. Start with AGENTS.md, HANDOFF.md, user_model.json, codex_budget_policy.md, process_learnings.md, README.md, START_HERE_PROMPT.txt, docs/startup-manifest.md, and docs/codex-box.md. Then read tools/codex-box, codex_governor_interface_spec.md, codex_governor_build_vs_borrow.md, codex_governor.py, test_codex_governor_spike.py, and sources.md. Use additional targeted reads only if needed to resolve uncertainty. Stay within 23% of the estimated five-hour budget. Work productively for the next hour, then stop and summarize what you learned.
+
+Task:
+$task_prompt
+EOF
+)
+
+exec env CODEX_ASSUME_EXTERNAL_SANDBOX=1 CODEX_OUT="$out_dir" \
+  python "$repo_root/codex_governor.py" launch "$wrapped_prompt" \
+    --request-summary "next-hour productive run" \
+    --task-kind analysis \
+    --risk low \
+    --candidate-file AGENTS.md \
+    --candidate-file HANDOFF.md \
+    --candidate-file user_model.json \
+    --candidate-file codex_budget_policy.md \
+    --candidate-file README.md \
+    --candidate-file START_HERE_PROMPT.txt \
+    --candidate-file docs/startup-manifest.md \
+    --candidate-file docs/codex-box.md \
+    --percent 23 \
+    --model gpt-5.4-mini \
+    --workdir "$repo_root" \
+    --snapshot-path "$out_dir/budget-snapshot.json" \
+    --audit-log-path "$out_dir/governor-audit.jsonl"

@@ -34,6 +34,9 @@ Use these when the space is genuinely uncertain or identity-relevant:
 - Use Git once state becomes nontrivial.
 - Before risky overwrite, preserve recovery path.
 - If the workspace becomes confusing, consolidate before adding more outputs.
+- Treat a full-workspace "read everything and summarize" run as a bootstrap audit. It is useful for measuring friction, but it is too expensive to repeat casually, so prefer a compact startup manifest plus targeted reads for normal launches.
+- If you do pay the bootstrap cost, record the measured token burn and promote the lesson into `process_learnings.md`, `codex_budget_policy.md`, or this handoff instead of re-learning it in the next run.
+- For the next-hour mode, use `tools/codex-hour-watch` if you want live audit tailing, or `tools/codex-hour-run` for a quieter launch; both stay under the 23% slice cap.
 
 ## Current active interests / workstreams
 ### 1) Codex / agent workflow design
@@ -57,6 +60,7 @@ Recommended implementation shape:
 - For child work, materialize the snapshot to disk, launch a bounded `codex exec` child with that snapshot, then refresh the snapshot after the run if it passed tests.
 - Recursive launcher calls are currently banned; child runs carry depth metadata and nested launcher invocations must fail closed until recursion accounting is implemented.
 - Hook / wrapper enforces behavior changes: no subagents, no broad scans, no giant context ingestion in constrained mode.
+- For launcher runs inside `tools/codex-box`, the intended defaults are `CODEX_ASSUME_EXTERNAL_SANDBOX=1`, `model = "gpt-5.4-mini"`, and `model_reasoning_effort = "xhigh"` in a fresh box config.
 
 ### 2) Security-conscious Codex box setup
 Michael wants strong containment against container escape and accidental damage outside the handoff boundary, while keeping enough write access for productive work inside the box.
