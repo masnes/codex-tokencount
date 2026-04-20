@@ -139,6 +139,21 @@ Charging model:
 
 This block should be small enough to inject without becoming its own cost center.
 
+For action selection, the tracker should also support an even smaller advice block:
+
+```json
+{
+  "top_waste": "delegation_heavy",
+  "actions": [
+    "avoid new child agents unless the task is clearly parallel and disjoint",
+    "prefer continuing in the current thread for the next step",
+    "if a child is necessary, require terse outputs"
+  ]
+}
+```
+
+This advice block is the preferred feedback path when you want the model to change behavior rather than inspect raw accounting detail.
+
 ## CLI surface
 
 Current canonical entrypoints:
@@ -147,6 +162,8 @@ Current canonical entrypoints:
 - `python codex_usage_tracker.py ingest-state-sqlite ...`
 - `python codex_usage_tracker.py summary ...`
 - `python codex_usage_tracker.py efficiency-hint ...`
+- `python codex_usage_tracker.py efficiency-advice ...`
+- `python codex_usage_tracker.py overhead-report ...`
 - `python codex_usage_tracker.py probe-sources ...`
 - `./tools/codex-usage ...`
 
@@ -159,6 +176,19 @@ Repeated import commands should report:
 Important state-sqlite filters:
 - `probe-sources --min-created-at-ms ...` or `--min-updated-at-ms ...`
 - `ingest-state-sqlite --min-created-at-ms ...` or `--min-updated-at-ms ...`
+
+## Overhead model
+
+The tracker should separate overhead into two buckets:
+- host-side collection overhead: local sqlite/jsonl reads and summarization, which cost zero model tokens
+- prompt overhead: the size of whatever tracker output you actually inject back into Codex
+
+`overhead-report` should estimate the prompt overhead for at least:
+- full summary JSON
+- efficiency hint JSON
+- efficiency advice JSON
+
+When a tokenizer is unavailable, a cheap approximation is acceptable for prompt-token estimation. The goal is comparative guidance, not invoice precision.
 
 ## Archive boundary
 

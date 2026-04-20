@@ -9,6 +9,7 @@
 - Keep live feedback tiny. A large observability payload can easily become its own inefficiency tax.
 - Dogfood the ledger under repeated imports before trusting it. A tracker that doubles history on the second ingest is worse than no tracker because it looks precise while lying.
 - Dogfood with live child agents, not just the primary thread. That is how you discover whether parent-child attribution survives real filters like "only threads created after this moment."
+- The dominant overhead is usually not reading local token counts; it is making the model read a bloated accounting block. Optimize the injected output first.
 
 ## 2026-04-15
 

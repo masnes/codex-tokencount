@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sqlite3
 from collections import defaultdict
@@ -922,6 +923,75 @@ def efficiency_hint(summary: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def efficiency_advice(summary: Mapping[str, Any]) -> dict[str, Any]:
+    shares = summary.get("shares") if isinstance(summary.get("shares"), dict) else {}
+    top_waste = _coerce_str(summary.get("top_waste")) or "none"
+    actions: list[str] = []
+
+    if top_waste == "delegation_heavy":
+        actions.append("avoid new child agents unless the task is clearly parallel and disjoint")
+        actions.append("prefer continuing in the current thread for the next step")
+        actions.append("if a child is necessary, require terse outputs")
+    elif top_waste == "output_heavy":
+        actions.append("keep status updates and summaries terse")
+        actions.append("prefer direct edits and tests over narrative explanations")
+        actions.append("collapse repeated summaries into one final synthesis")
+    elif top_waste == "low_cache_leverage":
+        actions.append("continue in the same thread to preserve cache leverage")
+        actions.append("reuse prior summaries instead of rereading large files")
+        actions.append("avoid restarting discovery from scratch")
+    else:
+        cached_share = _coerce_float(shares.get("cached_input")) or 0.0
+        fresh_share = _coerce_float(shares.get("fresh_input")) or 0.0
+        output_share = _coerce_float(shares.get("output")) or 0.0
+        child_share = _coerce_float(shares.get("child_agents")) or 0.0
+        if child_share >= 0.20:
+            actions.append("spawn fewer children unless their scope is sharply bounded")
+        if output_share >= 0.25:
+            actions.append("keep responses terse unless extra explanation changes the decision")
+        if fresh_share >= cached_share:
+            actions.append("favor thread continuity and reuse of existing context")
+        if not actions:
+            actions.append("current mix looks efficient enough; avoid adding observability bulk")
+
+    return {
+        "top_waste": top_waste,
+        "actions": actions[:3],
+    }
+
+
+def estimate_text_tokens(text: str) -> int:
+    # Cheap approximation for prompt budgeting when a tokenizer is unavailable.
+    return max(1, math.ceil(len(text) / 4))
+
+
+def overhead_report(summary: Mapping[str, Any]) -> dict[str, Any]:
+    summary_json = json.dumps(summary, sort_keys=True, separators=(",", ":"))
+    hint_json = json.dumps(efficiency_hint(summary), sort_keys=True, separators=(",", ":"))
+    advice_json = json.dumps(efficiency_advice(summary), sort_keys=True, separators=(",", ":"))
+    return {
+        "host_side": {
+            "model_tokens_for_collection": 0,
+            "note": "Local sqlite/jsonl reads happen on the host. Model-token overhead only appears if tracker output is injected back into Codex.",
+        },
+        "prompt_overhead": {
+            "summary_json": {
+                "bytes": len(summary_json.encode("utf-8")),
+                "approx_tokens": estimate_text_tokens(summary_json),
+            },
+            "efficiency_hint_json": {
+                "bytes": len(hint_json.encode("utf-8")),
+                "approx_tokens": estimate_text_tokens(hint_json),
+            },
+            "efficiency_advice_json": {
+                "bytes": len(advice_json.encode("utf-8")),
+                "approx_tokens": estimate_text_tokens(advice_json),
+            },
+        },
+        "recommended_injection": "efficiency_advice_json",
+    }
+
+
 def render_summary_text(summary: Mapping[str, Any]) -> str:
     credits = summary.get("shadow_credits") if isinstance(summary.get("shadow_credits"), dict) else {}
     shares = summary.get("shares") if isinstance(summary.get("shares"), dict) else {}
@@ -949,6 +1019,14 @@ def render_summary_text(summary: Mapping[str, Any]) -> str:
         )
     if summary.get("unpriced_models"):
         lines.append(f"unpriced_models={','.join(str(item) for item in summary['unpriced_models'])}")
+    return "\n".join(lines)
+
+
+def render_advice_text(advice: Mapping[str, Any]) -> str:
+    actions = advice.get("actions") if isinstance(advice.get("actions"), list) else []
+    lines = [f"top_waste={advice.get('top_waste')}"]
+    for index, action in enumerate(actions, start=1):
+        lines.append(f"action_{index}={action}")
     return "\n".join(lines)
 
 
@@ -1021,6 +1099,16 @@ def _build_parser() -> argparse.ArgumentParser:
     hint.add_argument("--ledger", required=True)
     hint.add_argument("--project-id")
     hint.add_argument("--format", choices=("text", "json"), default="json")
+
+    advice = subparsers.add_parser("efficiency-advice", help="Render a tiny actionable efficiency advice block.")
+    advice.add_argument("--ledger", required=True)
+    advice.add_argument("--project-id")
+    advice.add_argument("--format", choices=("text", "json"), default="json")
+
+    overhead = subparsers.add_parser("overhead-report", help="Estimate prompt overhead for tracker outputs.")
+    overhead.add_argument("--ledger", required=True)
+    overhead.add_argument("--project-id")
+    overhead.add_argument("--format", choices=("text", "json"), default="json")
 
     probe = subparsers.add_parser("probe-sources", help="Find likely local Codex telemetry sources.")
     probe.add_argument("--cwd")
@@ -1122,6 +1210,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(hint, indent=2, sort_keys=True))
         else:
             print(render_summary_text({"shadow_credits": {"total": hint.get("project_credits") or 0.0}, "shares": {"fresh_input": hint.get("fresh_input_share"), "output": hint.get("output_share"), "child_agents": hint.get("child_agent_share"), "cached_input": None}, "top_waste": hint.get("top_waste"), "event_count": hint.get("priced_event_count"), "priced_event_count": hint.get("priced_event_count"), "by_agent": [{"key": hint.get("top_agent"), "shadow_credits": {"total": hint.get("top_agent_credits") or 0.0}}] if hint.get("top_agent") else [], "unpriced_models": hint.get("unpriced_models") or []}))
+        return 0
+
+    if args.command == "efficiency-advice":
+        advice = efficiency_advice(summarize_usage_events(load_usage_events(Path(args.ledger)), project_id=args.project_id))
+        if args.format == "json":
+            print(json.dumps(advice, indent=2, sort_keys=True))
+        else:
+            print(render_advice_text(advice))
+        return 0
+
+    if args.command == "overhead-report":
+        report = overhead_report(summarize_usage_events(load_usage_events(Path(args.ledger)), project_id=args.project_id))
+        if args.format == "json":
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            print(json.dumps(report, sort_keys=True))
         return 0
 
     if args.command == "probe-sources":

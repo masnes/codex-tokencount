@@ -33,8 +33,9 @@ Suggested startup pattern:
 2. Start Codex in the target repo.
 3. Use `docs/startup-manifest.md` when you want the cheaper compact bootstrap path first.
 4. If you are instrumenting a project, start with `./tools/codex-usage probe-sources` to discover likely local telemetry roots, then use `ingest-jsonl` or `ingest-state-sqlite` and keep a local JSONL ledger per project. Repeated ingests are deduplicated by deterministic event IDs, so rerunning the same import is safe. When you want to isolate newly launched workers instead of a long parent thread, use `--min-created-at-ms` or `--min-updated-at-ms`.
-5. For manual onboarding, paste `START_HERE_PROMPT.txt`.
-6. Let Codex summarize its understanding before it starts changing things.
+5. If you want to feed the tracker back into Codex, prefer `./tools/codex-usage efficiency-advice` over a full summary. Use `./tools/codex-usage overhead-report` to estimate the prompt overhead before you inject anything.
+6. For manual onboarding, paste `START_HERE_PROMPT.txt`.
+7. Let Codex summarize its understanding before it starts changing things.
 
 Design philosophy:
 - Small durable guidance in `AGENTS.md`.

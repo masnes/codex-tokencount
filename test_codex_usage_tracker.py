@@ -7,10 +7,12 @@ from tempfile import TemporaryDirectory
 from codex_usage_tracker import (
     append_usage_events,
     build_usage_event,
+    efficiency_advice,
     efficiency_hint,
     events_from_jsonl,
     events_from_state_sqlite,
     load_usage_events,
+    overhead_report,
     probe_sources,
     shadow_credits_for_usage,
     summarize_usage_events,
@@ -148,6 +150,60 @@ class CodexUsageTrackerTests(unittest.TestCase):
 
         self.assertEqual(hint["top_waste"], "delegation_heavy")
         self.assertEqual(hint["top_agent"], "worker-1")
+
+    def test_efficiency_advice_recommends_reducing_delegation(self) -> None:
+        events = [
+            build_usage_event(
+                project_id="project-a",
+                session_id="session-a",
+                agent_id="primary",
+                model="gpt-5.4",
+                usage={"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 10},
+            ),
+            build_usage_event(
+                project_id="project-a",
+                session_id="session-a",
+                agent_id="worker-1",
+                parent_agent_id="primary",
+                model="gpt-5.4",
+                usage={"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 600},
+            ),
+        ]
+
+        advice = efficiency_advice(summarize_usage_events(events, project_id="project-a"))
+
+        self.assertEqual(advice["top_waste"], "delegation_heavy")
+        self.assertTrue(any("child agents" in action for action in advice["actions"]))
+
+    def test_overhead_report_prefers_advice_over_full_summary(self) -> None:
+        events = [
+            build_usage_event(
+                project_id="project-a",
+                session_id="session-a",
+                agent_id="primary",
+                model="gpt-5.4-mini",
+                phase="discovery",
+                usage={"input_tokens": 1000, "cached_input_tokens": 100, "output_tokens": 50},
+            ),
+            build_usage_event(
+                project_id="project-a",
+                session_id="session-a",
+                agent_id="worker-1",
+                parent_agent_id="primary",
+                model="gpt-5.4-mini",
+                phase="editing",
+                usage={"input_tokens": 500, "cached_input_tokens": 50, "output_tokens": 80},
+            ),
+        ]
+
+        report = overhead_report(summarize_usage_events(events, project_id="project-a"))
+
+        self.assertEqual(report["host_side"]["model_tokens_for_collection"], 0)
+        self.assertEqual(report["recommended_injection"], "efficiency_advice_json")
+        self.assertLess(
+            report["prompt_overhead"]["efficiency_advice_json"]["approx_tokens"],
+            report["prompt_overhead"]["summary_json"]["approx_tokens"],
+        )
 
     def test_append_and_load_usage_events_round_trip(self) -> None:
         with TemporaryDirectory() as tmpdir:
