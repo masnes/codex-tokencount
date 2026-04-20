@@ -4,7 +4,20 @@ Project-scoped token accounting and wrapper tooling for Codex sessions.
 
 If you use Codex locally and want to understand the cost shape of real work by project, this repo gives you a local ledger, lightweight workflow wrappers, and a clearer split between project accounting and authoritative quota state.
 
-## What Problem This Solves
+## Inspiration
+
+I wanted to make my codex use more token efficient relative to the output I got
+out of it. My primary current use case is to set this up as an easy to integrate
+harness that I can set up in codex sessions, and then have the model itself
+track its own usage. This lets us answer questions like "was it cheaper to spin
+up gpt-5.4-mini agents to do that, or to have the gpt-5.4 xhigh controller
+complete the task." Preliminary testing on my end is showing that it's fairly
+useful, although the model sometimes gets confused on things like optimizing to
+reduce agent percentage token usage even if high agent percentage token use
+reduces overall task token cost. Still, it's steerable and useful to have the
+metrics overall.
+
+## In General, What Problem This Solves:
 
 Codex exposes useful local telemetry, but the raw signals are awkward to use directly:
 
@@ -21,17 +34,17 @@ This repo turns that into a more usable workflow:
 ## Who This Is For
 
 - People running Codex locally who want project-level usage visibility.
-- People experimenting with agent workflows and wanting a cheaper feedback loop than "just guess."
-- People who want a wrapper around common checkpoint flows instead of raw telemetry ingestion every time.
+- People experimenting with agent workflows and wanting a cheap feedback loop.
+- People who want a wrapper around common checkpoint flows.
 
 ## What This Is Not
 
-- Not OpenAI billing.
-- Not an authoritative quota source.
-- Not a hard throttle.
-- Not a reason to route ordinary local work through the API.
+- Not an authoritative quota source. This is ad hoc interpretation of locally
+  exposed codex stats. And it's AI coded mostly, even if I'm steering it.
 
-## If You Only Read One Minute
+Use at your own peril.
+
+## Quickstart
 
 - `tools/codex-usage-checkpoint` is the main operator entrypoint.
 - `snapshot` is the fastest whole-project check.
@@ -41,7 +54,7 @@ This repo turns that into a more usable workflow:
 
 ## Live Steering Loop (Use Telemetry Inside The Current Codex Session)
 
-This is one of the highest-value workflows: generate a compact report during a task, paste it into the running Codex session as telemetry data, and ask it to adjust behavior (smaller reads, fewer re-reads, shorter outputs, better cache leverage).
+This is my original usecase workflow: Have codex generate compact reports during a task, load it into the running Codex session as telemetry data, and auto adjust behavior (smaller reads, fewer re-reads, shorter outputs, better cache leverage).
 
 Minimal loop:
 
@@ -50,14 +63,15 @@ Minimal loop:
 ./tools/codex-usage-checkpoint window --cutoff-mode updated --format json
 ```
 
-Paste only the `report` field from that JSON into the live session. Avoid pasting the raw ledger JSONL.
+Codex is best served by the `report` field from that JSON. The raw ledger JSONL
+is more token intensive so there's a higher token cost if you try and use that.
 
 ## Core Components
 
 - `codex_usage_tracker.py` - ledger, ingest, summaries, efficiency hints, and efficiency reports.
 - `tools/codex-usage` - thin wrapper around the tracker CLI for repo and copied-bundle layouts.
 - `tools/codex-usage-checkpoint` - one-command `mark`, `window`, `snapshot`, `probe`, and `smoke-test` flows.
-- `tools/codex-box` - Podman shim for a constrained Codex box.
+- `tools/codex-box` - Podman shim for a constrained Codex box. (old WIP, I might post this as a separate repo soon)
 - `archive/governor-spike-20260420/` - archived quota-governor spike retained as historical context.
 
 ## Fast Start
@@ -126,9 +140,11 @@ This repo is public-safe by default.
 
 - Keep technical defaults in `HANDOFF.md` and `user_model.json`.
 - Put private operator context in `HANDOFF.local.md` and `user_model.local.json`; both are gitignored.
-- Treat `archive/` as technical history, not as a place to store personal notes.
+- `archive/` is technical history of an older attempt at doing this with codex
+  --exec json. Much worse UX. Do not recommend.
 
 ## Design Stance
+(for Codex):
 
 - Keep project accounting separate from authoritative quota state.
 - Prefer compact factual outputs over bloated advice.
