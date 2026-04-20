@@ -46,8 +46,7 @@ This repo turns that into a more usable workflow:
 
 ## What This Is Not
 
-- Not an authoritative quota source. This is ad hoc interpretation of locally
-  exposed codex stats. And it's AI coded mostly, even if I'm steering it.
+Not an authoritative quota source. This is ad hoc interpretation of locally exposed codex stats. And it's AI coded mostly, even if I'm steering it.
 
 Use at your own peril.
 
