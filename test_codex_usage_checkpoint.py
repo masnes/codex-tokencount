@@ -356,6 +356,53 @@ class CodexUsageCheckpointTests(unittest.TestCase):
             self.assertIn("--project-id", calls[1]["args"])
             self.assertEqual(calls[1]["args"][calls[1]["args"].index("--project-id") + 1], "repo")
 
+    def test_probe_command_reuses_checkpoint_flag_surface(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            project_root = root / "repo"
+            project_root.mkdir()
+            log_path = root / "usage-tool-log.jsonl"
+            fake_tool = root / "fake-codex-usage"
+            self._write_fake_usage_tool(fake_tool, log_path)
+
+            env = os.environ.copy()
+            env["CODEX_USAGE_TOOL"] = str(fake_tool)
+            env["FAKE_USAGE_LOG"] = str(log_path)
+
+            result = subprocess.run(
+                [
+                    "/workspace/tools/codex-usage-checkpoint",
+                    "probe",
+                    "--project-id",
+                    "workspace",
+                    "--cwd-prefix",
+                    str(project_root),
+                    "--cutoff-ms",
+                    "1700000000123",
+                    "--cutoff-mode",
+                    "updated",
+                    "--format",
+                    "json",
+                ],
+                cwd=project_root,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            payload = json.loads(result.stdout)
+
+            self.assertEqual(payload[0]["kind"], "sqlite_state")
+            calls = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]["args"][0], "probe-sources")
+            self.assertIn("--project-id", calls[0]["args"])
+            self.assertEqual(calls[0]["args"][calls[0]["args"].index("--project-id") + 1], "workspace")
+            self.assertIn("--cwd-prefix", calls[0]["args"])
+            self.assertEqual(calls[0]["args"][calls[0]["args"].index("--cwd-prefix") + 1], str(project_root))
+            self.assertIn("--min-updated-at-ms", calls[0]["args"])
+            self.assertEqual(calls[0]["args"][calls[0]["args"].index("--min-updated-at-ms") + 1], "1700000000123")
+
     def test_usage_wrapper_finds_tracker_in_flat_copied_layout(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

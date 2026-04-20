@@ -26,7 +26,7 @@ fi
 command="snapshot"
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    mark|smoke-test|snapshot|window)
+    mark|probe|smoke-test|snapshot|window)
       command="$1"
       shift
       ;;
@@ -54,12 +54,13 @@ scoped_ledger=""
 usage() {
   cat <<'EOF'
 Usage:
-  codex-usage-checkpoint [snapshot|window|mark|smoke-test] [options]
+  codex-usage-checkpoint [snapshot|window|mark|probe|smoke-test] [options]
 
 Commands:
   snapshot   Ingest current repo-scoped usage and emit a compact report. Default.
-  window     Use a saved or explicit cutoff to isolate recent work. `created` means new threads after the cutoff; `updated` means post-cutoff activity in threads touched after the cutoff.
+  window     Use a saved or explicit cutoff to isolate recent work. `created` means new threads after the cutoff; `updated` means post-cutoff activity in threads touched after the cutoff. Re-running `window` with the same cutoff is cumulative since that mark until you mark again.
   mark       Record the current millisecond timestamp for a later `window` run.
+  probe      Run `probe-sources` with the same cwd/cutoff flag surface as this wrapper.
   smoke-test Validate wrapper resolution and probe local telemetry without writing a ledger.
 
 Options:
@@ -76,6 +77,7 @@ Options:
 
 Examples:
   ./tools/codex-usage-checkpoint mark
+  ./tools/codex-usage-checkpoint probe
   ./tools/codex-usage-checkpoint window
   ./tools/codex-usage-checkpoint smoke-test
   ./tools/codex-usage-checkpoint snapshot --format text
@@ -168,6 +170,19 @@ PY
   else
     printf 'command=mark project_id=%s cutoff_file=%s cutoff_ms=%s\n' "$project_id" "$cutoff_file" "$now_ms"
   fi
+  exit 0
+fi
+
+if [[ "$command" == "probe" ]]; then
+  probe_args=(probe-sources --project-id "$project_id" --cwd-prefix "$cwd_prefix" --format "$output_format")
+  if [[ -n "$cutoff_ms" ]]; then
+    if [[ "$cutoff_mode" == "created" ]]; then
+      probe_args+=(--min-created-at-ms "$cutoff_ms")
+    else
+      probe_args+=(--min-updated-at-ms "$cutoff_ms")
+    fi
+  fi
+  "$usage_tool" "${probe_args[@]}"
   exit 0
 fi
 

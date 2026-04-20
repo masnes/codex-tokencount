@@ -125,6 +125,12 @@ If only the minimal tracker bundle is present:
 
 Use the command prefix that matches the copied layout.
 
+Source discovery with the wrapper:
+
+```bash
+./tools/codex-usage-checkpoint probe
+```
+
 Repo-wide checkpoint:
 
 ```bash
@@ -149,6 +155,7 @@ Mode semantics:
 - default `window` is the clean child-session slice
 - `window --cutoff-mode updated` is the broader post-mark activity slice for the current task cell, including an already-running parent thread
 - if default `window` returns zero events, that often means the pass stayed on an existing thread; rerun with `--cutoff-mode updated`
+- rerunning `window` with the same cutoff is cumulative since that mark; run `mark` again when you want a fresh step-local slice
 
 ## Notes
 

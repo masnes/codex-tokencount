@@ -79,7 +79,7 @@ Do not assume the source machine's state DB was copied over intentionally. The t
 Probe likely telemetry sources:
 
 ```bash
-$USAGE probe-sources
+$CHECKPOINT probe
 ```
 
 Repo-wide checkpoint:
@@ -109,6 +109,7 @@ $CHECKPOINT window --cutoff-mode updated
 - `window --cutoff-mode updated` is broader
 - use `updated` when you want post-mark activity from an already-running parent thread as well
 - if default `window` returns zero events, that often means the pass stayed on an existing thread; rerun with `--cutoff-mode updated`
+- rerunning `window` with the same cutoff is cumulative since that mark; run `mark` again when you want a fresh step-local slice
 
 Important nuance:
 - updated-window imports are clipped by rollout timestamps
