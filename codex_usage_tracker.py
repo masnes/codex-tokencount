@@ -630,6 +630,14 @@ def probe_sources(
 
     candidates: list[tuple[Path, str]] = []
 
+    def should_skip_candidate_file(path: Path) -> bool:
+        if path.suffix != ".jsonl":
+            return False
+        try:
+            return path.stat().st_size == 0
+        except OSError:
+            return False
+
     def add_candidate(path: Path | None, discovered_from: str) -> None:
         if path is None:
             return
@@ -655,8 +663,10 @@ def probe_sources(
         candidate = candidate.expanduser()
         if candidate in seen_paths or not candidate.exists():
             continue
-        seen_paths.add(candidate)
         if candidate.is_file():
+            if should_skip_candidate_file(candidate):
+                continue
+            seen_paths.add(candidate)
             described.append(_describe_source(candidate, discovered_from=discovered_from))
             if candidate.suffix == ".sqlite":
                 for rollout_entry in _probe_rollouts_from_state_sqlite(
@@ -672,8 +682,11 @@ def probe_sources(
                     seen_paths.add(rollout_path)
                     described.append(rollout_entry)
             continue
+        seen_paths.add(candidate)
         for file_path in _walk_candidate_files(candidate):
             if file_path in seen_paths:
+                continue
+            if should_skip_candidate_file(file_path):
                 continue
             if not (filter_by_thread_time and file_path.suffix == ".jsonl"):
                 seen_paths.add(file_path)
@@ -1301,6 +1314,7 @@ def _build_parser() -> argparse.ArgumentParser:
     overhead.add_argument("--format", choices=("text", "json"), default="json")
 
     probe = subparsers.add_parser("probe-sources", help="Find likely local Codex telemetry sources.")
+    probe.add_argument("--project-id", help="Accepted for interface parity; source discovery does not use project ids.")
     probe.add_argument("--cwd")
     probe.add_argument("--cwd-prefix")
     probe.add_argument("--min-created-at-ms", type=int)

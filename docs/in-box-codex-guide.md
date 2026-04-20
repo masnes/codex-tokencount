@@ -108,6 +108,7 @@ $CHECKPOINT window --cutoff-mode updated
 - that mode is the clean slice for newly created child sessions after `mark`
 - `window --cutoff-mode updated` is broader
 - use `updated` when you want post-mark activity from an already-running parent thread as well
+- if default `window` returns zero events, that often means the pass stayed on an existing thread; rerun with `--cutoff-mode updated`
 
 Important nuance:
 - updated-window imports are clipped by rollout timestamps

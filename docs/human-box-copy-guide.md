@@ -148,6 +148,7 @@ Post-mark current-task slice:
 Mode semantics:
 - default `window` is the clean child-session slice
 - `window --cutoff-mode updated` is the broader post-mark activity slice for the current task cell, including an already-running parent thread
+- if default `window` returns zero events, that often means the pass stayed on an existing thread; rerun with `--cutoff-mode updated`
 
 ## Notes
 

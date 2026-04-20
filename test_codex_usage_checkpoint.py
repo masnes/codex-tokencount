@@ -43,7 +43,9 @@ class CodexUsageCheckpointTests(unittest.TestCase):
                         "session_count": 1,
                         "event_count": 5,
                     }
-                    if "-window-created-" in ledger or "-window-updated-" in ledger:
+                    if os.environ.get("FAKE_EMPTY_CREATED_WINDOW") == "1" and "-window-created-" in ledger:
+                        payload.update({"appended": 0, "event_count": 0, "skipped_duplicates": 0})
+                    elif "-window-created-" in ledger or "-window-updated-" in ledger:
                         payload.update({"appended": 5, "skipped_duplicates": 0})
                     else:
                         payload.update({"appended": 2, "skipped_duplicates": 3})
@@ -351,6 +353,8 @@ class CodexUsageCheckpointTests(unittest.TestCase):
 
             calls = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual([call["args"][0] for call in calls], ["--help", "probe-sources"])
+            self.assertIn("--project-id", calls[1]["args"])
+            self.assertEqual(calls[1]["args"][calls[1]["args"].index("--project-id") + 1], "repo")
 
     def test_usage_wrapper_finds_tracker_in_flat_copied_layout(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -370,6 +374,53 @@ class CodexUsageCheckpointTests(unittest.TestCase):
             )
 
             self.assertIn("Track project-scoped Codex usage and shadow credits.", result.stdout)
+
+    def test_window_created_mode_with_zero_events_emits_existing_thread_hint(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            project_root = root / "repo"
+            project_root.mkdir()
+            ledger = root / "workspace-ledger.jsonl"
+            cutoff_file = root / "workspace-cutoff-ms"
+            cutoff_ms = "1700000000123"
+            sqlite_path = root / "state_5.sqlite"
+            sqlite_path.write_text("", encoding="utf-8")
+            log_path = root / "usage-tool-log.jsonl"
+            fake_tool = root / "fake-codex-usage"
+            self._write_fake_usage_tool(fake_tool, log_path)
+
+            env = os.environ.copy()
+            env["CODEX_USAGE_TOOL"] = str(fake_tool)
+            env["FAKE_USAGE_LOG"] = str(log_path)
+            env["FAKE_EMPTY_CREATED_WINDOW"] = "1"
+
+            window = subprocess.run(
+                [
+                    "/workspace/tools/codex-usage-checkpoint",
+                    "window",
+                    "--project-id",
+                    "workspace",
+                    "--ledger",
+                    str(ledger),
+                    "--sqlite",
+                    str(sqlite_path),
+                    "--cwd-prefix",
+                    str(project_root),
+                    "--cutoff-file",
+                    str(cutoff_file),
+                    "--cutoff-ms",
+                    cutoff_ms,
+                ],
+                cwd=project_root,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            payload = json.loads(window.stdout)
+
+            self.assertEqual(payload["ingest"]["event_count"], 0)
+            self.assertIn("--cutoff-mode updated", payload["hint"])
 
 
 if __name__ == "__main__":

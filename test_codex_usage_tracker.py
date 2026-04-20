@@ -507,6 +507,20 @@ class CodexUsageTrackerTests(unittest.TestCase):
             self.assertEqual(matching[0]["kind"], "token_count_jsonl")
             self.assertTrue(matching[0]["importable"])
 
+    def test_probe_sources_skips_empty_jsonl_noise(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            empty = root / "workspace-ledger-window-created-123.jsonl"
+            empty.write_text("", encoding="utf-8")
+
+            sources = probe_sources(
+                cwd=root,
+                env={"CODEX_OUT": str(root)},
+            )
+
+            matching = [item for item in sources if item["path"] == str(empty)]
+            self.assertEqual(matching, [])
+
     def test_probe_sources_marks_sqlite_discovered_empty_rollout_as_importable(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

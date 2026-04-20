@@ -58,7 +58,7 @@ Usage:
 
 Commands:
   snapshot   Ingest current repo-scoped usage and emit a compact report. Default.
-  window     Use a saved or explicit cutoff to isolate a recent live-agent window.
+  window     Use a saved or explicit cutoff to isolate recent work. `created` means new threads after the cutoff; `updated` means post-cutoff activity in threads touched after the cutoff.
   mark       Record the current millisecond timestamp for a later `window` run.
   smoke-test Validate wrapper resolution and probe local telemetry without writing a ledger.
 
@@ -69,7 +69,7 @@ Options:
   --cwd-prefix PATH       Limit imports to threads under this cwd prefix.
   --cutoff-file PATH      File used by `mark` and `window`.
   --cutoff-ms MS          Explicit cutoff instead of reading the cutoff file.
-  --cutoff-mode MODE      `created` or `updated`. Default: created.
+  --cutoff-mode MODE      `created` or `updated`. `created` means new threads after the cutoff; `updated` means post-cutoff activity in updated threads. Default: created.
   --format FORMAT         `json` or `text`. Default: json.
   --no-overhead           Omit the overhead report from output.
   -h, --help              Show this help text.
@@ -176,7 +176,7 @@ if [[ "$command" == "smoke-test" ]]; then
   probe_status="not_run"
   probe_json="null"
   if [[ -f "$sqlite_path" ]]; then
-    probe_json="$("$usage_tool" probe-sources --cwd-prefix "$cwd_prefix" --max-results 5 --format json)"
+    probe_json="$("$usage_tool" probe-sources --project-id "$project_id" --cwd-prefix "$cwd_prefix" --max-results 5 --format json)"
     probe_status="ok"
   fi
   if [[ "$output_format" == "json" ]]; then
@@ -261,6 +261,9 @@ import json, sys
 
 command, project_id, ledger, report_ledger, sqlite_path, cwd_prefix, cutoff_mode, cutoff_ms, project_ingest_json, ingest_json, report_json, overhead_json = sys.argv[1:]
 
+ingest = json.loads(ingest_json)
+report = json.loads(report_json)
+
 result = {
     "command": command,
     "project_id": project_id,
@@ -272,8 +275,8 @@ result = {
         "mode": cutoff_mode,
         "cutoff_ms": int(cutoff_ms),
     },
-    "ingest": json.loads(ingest_json),
-    "report": json.loads(report_json),
+    "ingest": ingest,
+    "report": report,
 }
 
 if project_ingest_json != "null":
@@ -282,12 +285,28 @@ if project_ingest_json != "null":
 if overhead_json != "null":
     result["overhead"] = json.loads(overhead_json)
 
+if command == "window" and cutoff_mode == "created" and int(ingest.get("event_count") or 0) == 0:
+    result["hint"] = (
+        "created windows only include threads created after the cutoff; "
+        "if work stayed on an existing thread, rerun with --cutoff-mode updated."
+    )
+
 print(json.dumps(result, indent=2, sort_keys=True))
 PY
 else
   printf 'command=%s project_id=%s ledger=%s report_ledger=%s sqlite=%s cwd_prefix=%s\n' "$command" "$project_id" "$ledger" "$report_ledger" "$sqlite_path" "$cwd_prefix"
   if [[ -n "$cutoff_ms" ]]; then
     printf 'filter mode=%s cutoff_ms=%s\n' "$cutoff_mode" "$cutoff_ms"
+  fi
+  if [[ "$command" == "window" && "$cutoff_mode" == "created" ]]; then
+    created_event_count="$(python - <<'PY' "$ingest_json"
+import json, sys
+print(int((json.loads(sys.argv[1]).get("event_count") or 0)))
+PY
+)"
+    if [[ "$created_event_count" -eq 0 ]]; then
+      printf 'hint created windows only include threads created after the cutoff; if work stayed on an existing thread, rerun with --cutoff-mode updated.\n'
+    fi
   fi
   if [[ "$project_ingest_json" != "null" ]]; then
     printf '\n[project-ingest]\n%s\n' "$project_ingest_json"
