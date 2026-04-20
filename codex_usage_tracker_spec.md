@@ -180,6 +180,7 @@ Current canonical entrypoints:
 - `python codex_usage_tracker.py overhead-report ...`
 - `python codex_usage_tracker.py probe-sources ...`
 - `./tools/codex-usage ...`
+- `./tools/codex-usage-checkpoint [snapshot|window|mark] ...`
 
 Repeated import commands should report:
 - source event count
@@ -190,6 +191,12 @@ Repeated import commands should report:
 Important state-sqlite filters:
 - `probe-sources --min-created-at-ms ...` or `--min-updated-at-ms ...`
 - `ingest-state-sqlite --min-created-at-ms ...` or `--min-updated-at-ms ...`
+
+Convenience wrapper:
+- `codex-usage-checkpoint snapshot` should ingest the current repo-scoped window and emit a combined report.
+- `codex-usage-checkpoint mark` should save a millisecond cutoff for later use.
+- `codex-usage-checkpoint window` should reuse that cutoff, keep the main project ledger current, and emit its report from a separate scoped ledger for that cutoff.
+- `codex-usage-checkpoint window --cutoff-mode updated` should support slicing the current thread after a mark; the default `created` mode is for newly spawned child sessions.
 
 ## Overhead model
 

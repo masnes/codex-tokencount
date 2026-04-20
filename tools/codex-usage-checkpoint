@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+usage_tool="${CODEX_USAGE_TOOL:-$repo_root/tools/codex-usage}"
+
+command="snapshot"
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    mark|snapshot|window)
+      command="$1"
+      shift
+      ;;
+  esac
+fi
+
+default_root="$PWD"
+if git_root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"; then
+  default_root="$git_root"
+fi
+
+project_id="$(basename "$default_root")"
+artifact_root="${CODEX_OUT:-$default_root/_codex_out/usage-tracker}"
+ledger="$artifact_root/${project_id}-ledger.jsonl"
+cutoff_file="$artifact_root/${project_id}-cutoff-ms"
+cwd_prefix="$default_root"
+sqlite_path="${CODEX_USAGE_SQLITE:-${CODEX_HOME:-$HOME/.codex}/state_5.sqlite}"
+cutoff_mode="created"
+cutoff_ms=""
+include_overhead=1
+output_format="json"
+report_ledger="$ledger"
+scoped_ledger=""
+
+usage() {
+  cat <<'EOF'
+Usage:
+  codex-usage-checkpoint [snapshot|window|mark] [options]
+
+Commands:
+  snapshot   Ingest current repo-scoped usage and emit a compact report. Default.
+  window     Use a saved or explicit cutoff to isolate a recent live-agent window.
+  mark       Record the current millisecond timestamp for a later `window` run.
+
+Options:
+  --project-id ID         Project id stored in the ledger.
+  --ledger PATH           Ledger JSONL path.
+  --sqlite PATH           Path to Codex state_5.sqlite.
+  --cwd-prefix PATH       Limit imports to threads under this cwd prefix.
+  --cutoff-file PATH      File used by `mark` and `window`.
+  --cutoff-ms MS          Explicit cutoff instead of reading the cutoff file.
+  --cutoff-mode MODE      `created` or `updated`. Default: created.
+  --format FORMAT         `json` or `text`. Default: json.
+  --no-overhead           Omit the overhead report from output.
+  -h, --help              Show this help text.
+
+Examples:
+  ./tools/codex-usage-checkpoint mark
+  ./tools/codex-usage-checkpoint window
+  ./tools/codex-usage-checkpoint snapshot --format text
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project-id)
+      project_id="${2:?missing value for --project-id}"
+      shift 2
+      ;;
+    --ledger)
+      ledger="${2:?missing value for --ledger}"
+      shift 2
+      ;;
+    --sqlite)
+      sqlite_path="${2:?missing value for --sqlite}"
+      shift 2
+      ;;
+    --cwd-prefix)
+      cwd_prefix="${2:?missing value for --cwd-prefix}"
+      shift 2
+      ;;
+    --cutoff-file)
+      cutoff_file="${2:?missing value for --cutoff-file}"
+      shift 2
+      ;;
+    --cutoff-ms)
+      cutoff_ms="${2:?missing value for --cutoff-ms}"
+      shift 2
+      ;;
+    --cutoff-mode)
+      cutoff_mode="${2:?missing value for --cutoff-mode}"
+      shift 2
+      ;;
+    --format)
+      output_format="${2:?missing value for --format}"
+      shift 2
+      ;;
+    --no-overhead)
+      include_overhead=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "$cutoff_mode" in
+  created|updated) ;;
+  *)
+    echo "--cutoff-mode must be 'created' or 'updated'" >&2
+    exit 2
+    ;;
+esac
+
+case "$output_format" in
+  json|text) ;;
+  *)
+    echo "--format must be 'json' or 'text'" >&2
+    exit 2
+    ;;
+esac
+
+mkdir -p "$(dirname -- "$ledger")" "$(dirname -- "$cutoff_file")"
+
+if [[ "$command" == "mark" ]]; then
+  now_ms="$(date +%s%3N)"
+  printf '%s\n' "$now_ms" > "$cutoff_file"
+  if [[ "$output_format" == "json" ]]; then
+    python - <<'PY' "$project_id" "$cutoff_file" "$now_ms"
+import json, sys
+print(json.dumps({
+    "command": "mark",
+    "project_id": sys.argv[1],
+    "cutoff_file": sys.argv[2],
+    "cutoff_ms": int(sys.argv[3]),
+}, indent=2, sort_keys=True))
+PY
+  else
+    printf 'command=mark project_id=%s cutoff_file=%s cutoff_ms=%s\n' "$project_id" "$cutoff_file" "$now_ms"
+  fi
+  exit 0
+fi
+
+if [[ "$command" == "window" && -z "$cutoff_ms" ]]; then
+  if [[ ! -f "$cutoff_file" ]]; then
+    echo "cutoff file not found: $cutoff_file" >&2
+    echo "Run 'codex-usage-checkpoint mark' first or pass --cutoff-ms." >&2
+    exit 1
+  fi
+  cutoff_ms="$(tr -d '[:space:]' < "$cutoff_file")"
+fi
+
+common_ingest_args=(
+  ingest-state-sqlite
+  --sqlite "$sqlite_path"
+  --project-id "$project_id"
+  --cwd-prefix "$cwd_prefix"
+)
+
+if [[ -n "$cutoff_ms" ]]; then
+  if [[ "$cutoff_mode" == "created" ]]; then
+    common_ingest_args+=(--min-created-at-ms "$cutoff_ms")
+  else
+    common_ingest_args+=(--min-updated-at-ms "$cutoff_ms")
+  fi
+fi
+
+project_ingest_json="null"
+if [[ "$command" == "window" ]]; then
+  ledger_dir="$(dirname -- "$ledger")"
+  ledger_base="$(basename -- "$ledger")"
+  ledger_stem="${ledger_base%.jsonl}"
+  scoped_ledger="$ledger_dir/${ledger_stem}-window-${cutoff_mode}-${cutoff_ms}.jsonl"
+  report_ledger="$scoped_ledger"
+  project_ingest_json="$("$usage_tool" "${common_ingest_args[@]}" --ledger "$ledger")"
+fi
+
+ingest_json="$("$usage_tool" "${common_ingest_args[@]}" --ledger "$report_ledger")"
+report_json="$("$usage_tool" efficiency-report --ledger "$report_ledger" --project-id "$project_id" --format json)"
+
+overhead_json="null"
+if [[ "$include_overhead" -eq 1 ]]; then
+  overhead_json="$("$usage_tool" overhead-report --ledger "$report_ledger" --project-id "$project_id" --format json)"
+fi
+
+if [[ "$output_format" == "json" ]]; then
+  python - <<'PY' "$command" "$project_id" "$ledger" "$report_ledger" "$sqlite_path" "$cwd_prefix" "$cutoff_mode" "${cutoff_ms:-}" "$project_ingest_json" "$ingest_json" "$report_json" "$overhead_json"
+import json, sys
+
+command, project_id, ledger, report_ledger, sqlite_path, cwd_prefix, cutoff_mode, cutoff_ms, project_ingest_json, ingest_json, report_json, overhead_json = sys.argv[1:]
+
+result = {
+    "command": command,
+    "project_id": project_id,
+    "ledger": ledger,
+    "report_ledger": report_ledger,
+    "sqlite": sqlite_path,
+    "cwd_prefix": cwd_prefix,
+    "filter": None if not cutoff_ms else {
+        "mode": cutoff_mode,
+        "cutoff_ms": int(cutoff_ms),
+    },
+    "ingest": json.loads(ingest_json),
+    "report": json.loads(report_json),
+}
+
+if project_ingest_json != "null":
+    result["project_ingest"] = json.loads(project_ingest_json)
+
+if overhead_json != "null":
+    result["overhead"] = json.loads(overhead_json)
+
+print(json.dumps(result, indent=2, sort_keys=True))
+PY
+else
+  printf 'command=%s project_id=%s ledger=%s report_ledger=%s sqlite=%s cwd_prefix=%s\n' "$command" "$project_id" "$ledger" "$report_ledger" "$sqlite_path" "$cwd_prefix"
+  if [[ -n "$cutoff_ms" ]]; then
+    printf 'filter mode=%s cutoff_ms=%s\n' "$cutoff_mode" "$cutoff_ms"
+  fi
+  if [[ "$project_ingest_json" != "null" ]]; then
+    printf '\n[project-ingest]\n%s\n' "$project_ingest_json"
+  fi
+  printf '\n[ingest]\n%s\n' "$ingest_json"
+  printf '\n[report]\n'
+  "$usage_tool" efficiency-report --ledger "$report_ledger" --project-id "$project_id" --format text
+  if [[ "$include_overhead" -eq 1 ]]; then
+    printf '\n[overhead]\n%s\n' "$overhead_json"
+  fi
+fi
