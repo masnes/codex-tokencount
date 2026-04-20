@@ -2,21 +2,26 @@
 
 Project-scoped token accounting and wrapper tooling for Codex sessions.
 
-If you use Codex locally and want to understand the cost shape of real work by project, this repo gives you a local ledger, lightweight workflow wrappers, and a clearer split between project accounting and authoritative quota state.
+## What Is This Project?
 
-## What Problem This Solves
+Codex is an agentic coding CLI that writes local session telemetry. This repo reads that local telemetry and turns it into something you can use for project-level accounting and workflow decisions.
 
-Codex exposes useful local telemetry, but the raw signals are awkward to use directly:
+This repo is a small toolkit that turns Codex's local telemetry (your on-machine session logs) into:
 
-- usage is easy to blur across projects
-- long-lived parent threads can drown out the slice you actually care about
-- raw token counts hide the economic difference between fresh input, cached input, and output
+- a project-scoped JSONL ledger you can keep per repo
+- compact reports you can read (or inject back into Codex) without hauling a giant context blob
 
-This repo turns that into a more usable workflow:
+If you're skimming a public repo and asking "what do I get?", the answer is: repeatable commands that tell you where your Codex usage went for this repo and for a recent slice of work.
 
-1. Read local telemetry from the machine doing the work.
-2. Build a project-scoped ledger.
-3. Render compact summaries that are good enough to steer real decisions.
+## Why Does This Exist?
+
+Codex usage is easy to misread in practice:
+
+- you work across multiple repos, but the raw signals are not naturally "per project"
+- one long-lived parent thread can drown out a recent batch of work
+- token counts alone hide the economic difference between fresh input, cached input, and output
+
+This repo exists to make those realities legible enough to change behavior.
 
 ## Who This Is For
 
@@ -30,6 +35,46 @@ This repo turns that into a more usable workflow:
 - Not an authoritative quota source.
 - Not a hard throttle.
 - Not a reason to route ordinary local work through the API.
+
+## Useful Info First (2 Minutes)
+
+1. See what commands exist:
+
+```bash
+./tools/codex-usage-checkpoint --help
+```
+
+2. Check whether the wrapper can see local telemetry on this machine:
+
+```bash
+./tools/codex-usage-checkpoint smoke-test --format json
+```
+
+If `smoke-test` fails due to a nonstandard telemetry path, set `CODEX_USAGE_SQLITE` and rerun:
+
+```bash
+export CODEX_USAGE_SQLITE="${CODEX_HOME:-$HOME/.codex}/state_5.sqlite"
+./tools/codex-usage-checkpoint smoke-test --format json
+```
+
+3. Get a whole-project checkpoint:
+
+```bash
+./tools/codex-usage-checkpoint snapshot --format text
+```
+
+4. If you want a task-local slice, mark a baseline, do the work, then inspect the window:
+
+```bash
+./tools/codex-usage-checkpoint mark
+./tools/codex-usage-checkpoint window --format text
+```
+
+If `window` shows zero events and you expected activity, it often means the work stayed on an existing thread. Rerun with:
+
+```bash
+./tools/codex-usage-checkpoint window --cutoff-mode updated --format text
+```
 
 ## If You Only Read One Minute
 
@@ -47,39 +92,16 @@ This repo turns that into a more usable workflow:
 - `tools/codex-box` - Podman shim for a constrained Codex box.
 - `archive/governor-spike-20260420/` - archived quota-governor spike retained as historical context.
 
-## Fast Start
+## How It Works (High Level)
 
-1. Inspect the CLI surface.
+The tracker is intentionally boring:
 
-```bash
-./tools/codex-usage --help
-./tools/codex-usage-checkpoint --help
-```
+1. Read local telemetry sources (typically a Codex state SQLite file that points at per-thread rollout logs).
+2. Normalize usage into per-event deltas.
+3. Append events into a JSONL ledger with stable event IDs (so re-ingesting does not double count).
+4. Summarize into `summary`, `efficiency-hint`, and `efficiency-report` outputs.
 
-2. If you have a local Codex state database, check whether the wrapper can see it.
-
-```bash
-./tools/codex-usage-checkpoint smoke-test --format json
-```
-
-3. Get a whole-project checkpoint.
-
-```bash
-./tools/codex-usage-checkpoint snapshot --format text
-```
-
-4. If you want a task-local slice, mark a baseline, do the work, then inspect the window.
-
-```bash
-./tools/codex-usage-checkpoint mark
-./tools/codex-usage-checkpoint window --format text
-```
-
-If `window` shows zero events and you expected activity, rerun with:
-
-```bash
-./tools/codex-usage-checkpoint window --cutoff-mode updated --format text
-```
+Shadow pricing is optional but useful: it applies a checked-in rate card so "cached input vs fresh input vs output" differences show up directly in the report.
 
 ## How To Read The Main Workflows
 
