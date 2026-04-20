@@ -1,12 +1,8 @@
 {
-  "identity": {
-    "name": "Michael Asnes",
-    "location_region": "Westminster / Boulder / Denver corridor",
-    "education": [
-      "BA in Computer Science",
-      "BA in Philosophy"
-    ],
-    "work_orientation": "Infrastructure / DevOps / systems-minded"
+  "profile_kind": "public_repo_template",
+  "operator_profile": {
+    "role": "systems-minded technical operator",
+    "work_orientation": "infrastructure / devops / tooling"
   },
   "core_preferences": {
     "truth_seeking_over_agreeableness": true,
@@ -30,9 +26,6 @@
       "fake precision"
     ]
   },
-  "special_modes": {
-    "nn_token": "If `nn`/`Nn`/`NN` appears as a standalone token at the start or end, do deeper neutral analysis before concluding."
-  },
   "workflow_rules": {
     "infra_mode": "read first -> brief plan -> small auditable diffs -> preserve recoverability",
     "git_trigger": [
@@ -45,63 +38,10 @@
     "artifact_hygiene": "one canonical target per deliverable unless explicitly branching"
   },
   "active_workstreams": [
-    "Codex project-scoped token observability / efficiency design",
+    "Project-scoped Codex token observability and shadow pricing",
+    "Checkpoint wrapper ergonomics and portability",
     "Security-conscious Codex box setup",
-    "Reading recommendation mining / prose-fit filtering",
-    "Wardrobe / style / color analysis project",
-    "Productivity / systems optimization"
+    "Archived quota-governor prior art"
   ],
-  "reading_taste": {
-    "likes": [
-      "high-agency protagonists",
-      "competence loops",
-      "system exploitation",
-      "technical / institutional maneuvering"
-    ],
-    "dislikes": [
-      "slow low-hook pacing",
-      "quippy comedic drift",
-      "mentor-carry early arcs",
-      "shonen/tournament feel without deep system play"
-    ],
-    "positive_signals": [
-      "There Is No Antimemetics Division",
-      "qntm generally",
-      "Sedition",
-      "Mother of Learning"
-    ]
-  },
-  "style_project": {
-    "workflow": [
-      "color first",
-      "silhouette second",
-      "fill wardrobe third"
-    ],
-    "working_model": {
-      "kibbe": "Soft Natural dominant with Soft Classic secondary",
-      "kitchener": "Classic + Natural dominant, Gamine edge, Ethereal atmosphere"
-    },
-    "color_signals": [
-      "ink navy strong",
-      "teals often strong",
-      "optic white usually bad",
-      "black often bad",
-      "grey often mediocre",
-      "clean medium-depth medium-chroma colors often outperform dusty or ultra-bright ones"
-    ]
-  },
-  "practical_life": {
-    "outdoor_hobbies": [
-      "climbing",
-      "skiing",
-      "hiking"
-    ],
-    "creative_interests": [
-      "music",
-      "cooking",
-      "mixology",
-      "high-quality digital media"
-    ],
-    "social_model": "ambivert"
-  }
+  "privacy_note": "Keep private operator details in user_model.local.json. That file is intentionally gitignored in this public repo."
 }

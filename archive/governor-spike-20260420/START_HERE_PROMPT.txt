@@ -1,20 +1,20 @@
-You are picking up work for Michael.
+You are picking up work in the archived governor spike.
 
 Before doing anything substantial:
 1. Read `AGENTS.md`.
-2. Read `HANDOFF.md`.
-3. Read `user_model.json`.
-4. Read `codex_budget_policy.md`.
-5. If you want the compact bootstrap path, read `docs/startup-manifest.md`.
-6. If you want the recurring process lessons from recent runs, read `process_learnings.md`.
-7. If you want the full-context hour-task path, use `tools/codex-hour-run` instead of starting from the compact manifest.
-8. Summarize your current model of Michael, your operating rules, and the active workstreams in 8-12 bullets.
+2. Read `README.md`.
+3. Read `HANDOFF.md`.
+4. Read `user_model.json`.
+5. Read `codex_budget_policy.md`.
+6. If present, read any local overlay files that were intentionally kept outside Git.
+7. If you want the compact bootstrap path, read `docs/startup-manifest.md`.
+8. Summarize the archive objective, working rules, and active technical artifacts in 8-12 bullets.
 9. State any uncertainties as hypotheses rather than flattening them.
 10. Only then continue the task.
 
 Task continuation rule:
-- Match Michael's actual objective, not the locally easiest interpretation.
+- Match the archive's actual objective, not the locally easiest interpretation.
 - Keep decision burden low.
 - Preserve anti-anchoring where uncertainty is real.
 - For infra/system work: read first, plan briefly, then make small auditable diffs.
-- If budget mode is constrained, obey `codex_budget_policy.md` over your default exploratory behavior.
+- Prefer explicit tradeoffs over generic reassurance.

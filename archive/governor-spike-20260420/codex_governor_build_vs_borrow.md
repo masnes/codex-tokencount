@@ -74,7 +74,7 @@ Recommendation:
 - Keep instruction sources separate from data sources.
 
 ## Recommended Implementation Sequence
-1. Use [codex_governor_interface_spec.md](/workspace/codex_governor_interface_spec.md) as the implementation contract for `status_provider`, `usage_provider`, and `policy_engine`.
+1. Use [codex_governor_interface_spec.md](codex_governor_interface_spec.md) as the implementation contract for `status_provider`, `usage_provider`, and `policy_engine`.
 2. Verify the official Codex hooks/rules/config surface against the current docs.
 3. Evaluate `ccusage` only for telemetry reuse.
 4. Build the governor logic around the smallest stable contract possible.

@@ -7,6 +7,11 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+REPO_ROOT = Path(__file__).resolve().parent
+CHECKPOINT_WRAPPER = REPO_ROOT / "tools" / "codex-usage-checkpoint"
+USAGE_WRAPPER = REPO_ROOT / "tools" / "codex-usage"
+TRACKER_SCRIPT = REPO_ROOT / "codex_usage_tracker.py"
+
 
 class CodexUsageCheckpointTests(unittest.TestCase):
     def _write_fake_usage_tool(self, path: Path, log_path: Path) -> None:
@@ -130,7 +135,7 @@ class CodexUsageCheckpointTests(unittest.TestCase):
 
             mark = subprocess.run(
                 [
-                    "/workspace/tools/codex-usage-checkpoint",
+                    str(CHECKPOINT_WRAPPER),
                     "mark",
                     "--project-id",
                     "workspace",
@@ -150,7 +155,7 @@ class CodexUsageCheckpointTests(unittest.TestCase):
 
             window = subprocess.run(
                 [
-                    "/workspace/tools/codex-usage-checkpoint",
+                    str(CHECKPOINT_WRAPPER),
                     "window",
                     "--project-id",
                     "workspace",
@@ -211,7 +216,7 @@ class CodexUsageCheckpointTests(unittest.TestCase):
 
             window = subprocess.run(
                 [
-                    "/workspace/tools/codex-usage-checkpoint",
+                    str(CHECKPOINT_WRAPPER),
                     "window",
                     "--project-id",
                     "workspace",
@@ -281,7 +286,7 @@ class CodexUsageCheckpointTests(unittest.TestCase):
 
             snapshot = subprocess.run(
                 [
-                    "/workspace/tools/codex-usage-checkpoint",
+                    str(CHECKPOINT_WRAPPER),
                     "snapshot",
                     "--project-id",
                     "workspace",
@@ -331,7 +336,7 @@ class CodexUsageCheckpointTests(unittest.TestCase):
 
             smoke = subprocess.run(
                 [
-                    "/workspace/tools/codex-usage-checkpoint",
+                    str(CHECKPOINT_WRAPPER),
                     "smoke-test",
                     "--sqlite",
                     str(sqlite_path),
@@ -371,7 +376,7 @@ class CodexUsageCheckpointTests(unittest.TestCase):
 
             result = subprocess.run(
                 [
-                    "/workspace/tools/codex-usage-checkpoint",
+                    str(CHECKPOINT_WRAPPER),
                     "probe",
                     "--project-id",
                     "workspace",
@@ -408,8 +413,8 @@ class CodexUsageCheckpointTests(unittest.TestCase):
             root = Path(tmpdir)
             wrapper_path = root / "codex-usage"
             tracker_path = root / "codex_usage_tracker.py"
-            wrapper_path.write_text(Path("/workspace/tools/codex-usage").read_text(encoding="utf-8"), encoding="utf-8")
-            tracker_path.write_text(Path("/workspace/codex_usage_tracker.py").read_text(encoding="utf-8"), encoding="utf-8")
+            wrapper_path.write_text(USAGE_WRAPPER.read_text(encoding="utf-8"), encoding="utf-8")
+            tracker_path.write_text(TRACKER_SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
             wrapper_path.chmod(wrapper_path.stat().st_mode | stat.S_IXUSR)
 
             result = subprocess.run(
@@ -443,7 +448,7 @@ class CodexUsageCheckpointTests(unittest.TestCase):
 
             window = subprocess.run(
                 [
-                    "/workspace/tools/codex-usage-checkpoint",
+                    str(CHECKPOINT_WRAPPER),
                     "window",
                     "--project-id",
                     "workspace",
