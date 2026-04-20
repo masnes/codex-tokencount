@@ -7,8 +7,8 @@ from tempfile import TemporaryDirectory
 from codex_usage_tracker import (
     append_usage_events,
     build_usage_event,
-    efficiency_advice,
     efficiency_hint,
+    efficiency_report,
     events_from_jsonl,
     events_from_state_sqlite,
     load_usage_events,
@@ -151,7 +151,7 @@ class CodexUsageTrackerTests(unittest.TestCase):
         self.assertEqual(hint["top_waste"], "delegation_heavy")
         self.assertEqual(hint["top_agent"], "worker-1")
 
-    def test_efficiency_advice_recommends_reducing_delegation(self) -> None:
+    def test_efficiency_report_describes_delegation_heavy_projects(self) -> None:
         events = [
             build_usage_event(
                 project_id="project-a",
@@ -170,12 +170,13 @@ class CodexUsageTrackerTests(unittest.TestCase):
             ),
         ]
 
-        advice = efficiency_advice(summarize_usage_events(events, project_id="project-a"))
+        report = efficiency_report(summarize_usage_events(events, project_id="project-a"))
 
-        self.assertEqual(advice["top_waste"], "delegation_heavy")
-        self.assertTrue(any("child agents" in action for action in advice["actions"]))
+        self.assertEqual(report["top_waste"], "delegation_heavy")
+        self.assertGreater(report["basis"]["child_agent_share"], 0.9)
+        self.assertEqual(report["top_agents"][0]["agent"], "worker-1")
 
-    def test_overhead_report_prefers_advice_over_full_summary(self) -> None:
+    def test_overhead_report_prefers_report_over_full_summary(self) -> None:
         events = [
             build_usage_event(
                 project_id="project-a",
@@ -199,9 +200,9 @@ class CodexUsageTrackerTests(unittest.TestCase):
         report = overhead_report(summarize_usage_events(events, project_id="project-a"))
 
         self.assertEqual(report["host_side"]["model_tokens_for_collection"], 0)
-        self.assertEqual(report["recommended_injection"], "efficiency_advice_json")
+        self.assertEqual(report["recommended_injection"], "efficiency_report_json")
         self.assertLess(
-            report["prompt_overhead"]["efficiency_advice_json"]["approx_tokens"],
+            report["prompt_overhead"]["efficiency_report_json"]["approx_tokens"],
             report["prompt_overhead"]["summary_json"]["approx_tokens"],
         )
 

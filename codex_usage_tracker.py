@@ -923,40 +923,66 @@ def efficiency_hint(summary: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def efficiency_advice(summary: Mapping[str, Any]) -> dict[str, Any]:
+def efficiency_report(summary: Mapping[str, Any]) -> dict[str, Any]:
     shares = summary.get("shares") if isinstance(summary.get("shares"), dict) else {}
+    by_agent = summary.get("by_agent") if isinstance(summary.get("by_agent"), list) else []
+    by_model = summary.get("by_model") if isinstance(summary.get("by_model"), list) else []
+    by_phase = summary.get("by_phase") if isinstance(summary.get("by_phase"), list) else []
     top_waste = _coerce_str(summary.get("top_waste")) or "none"
-    actions: list[str] = []
 
+    basis: dict[str, Any] = {}
     if top_waste == "delegation_heavy":
-        actions.append("avoid new child agents unless the task is clearly parallel and disjoint")
-        actions.append("prefer continuing in the current thread for the next step")
-        actions.append("if a child is necessary, require terse outputs")
+        basis["child_agent_share"] = shares.get("child_agents")
     elif top_waste == "output_heavy":
-        actions.append("keep status updates and summaries terse")
-        actions.append("prefer direct edits and tests over narrative explanations")
-        actions.append("collapse repeated summaries into one final synthesis")
+        basis["output_share"] = shares.get("output")
     elif top_waste == "low_cache_leverage":
-        actions.append("continue in the same thread to preserve cache leverage")
-        actions.append("reuse prior summaries instead of rereading large files")
-        actions.append("avoid restarting discovery from scratch")
+        basis["fresh_input_share"] = shares.get("fresh_input")
+        basis["cached_input_share"] = shares.get("cached_input")
     else:
-        cached_share = _coerce_float(shares.get("cached_input")) or 0.0
-        fresh_share = _coerce_float(shares.get("fresh_input")) or 0.0
-        output_share = _coerce_float(shares.get("output")) or 0.0
-        child_share = _coerce_float(shares.get("child_agents")) or 0.0
-        if child_share >= 0.20:
-            actions.append("spawn fewer children unless their scope is sharply bounded")
-        if output_share >= 0.25:
-            actions.append("keep responses terse unless extra explanation changes the decision")
-        if fresh_share >= cached_share:
-            actions.append("favor thread continuity and reuse of existing context")
-        if not actions:
-            actions.append("current mix looks efficient enough; avoid adding observability bulk")
+        basis["fresh_input_share"] = shares.get("fresh_input")
+        basis["cached_input_share"] = shares.get("cached_input")
+        basis["output_share"] = shares.get("output")
+
+    top_agents = [
+        {
+            "agent": item.get("key"),
+            "credits": (item.get("shadow_credits") or {}).get("total"),
+            "input_tokens": (item.get("tokens") or {}).get("input_tokens"),
+            "output_tokens": (item.get("tokens") or {}).get("output_tokens"),
+        }
+        for item in by_agent[:3]
+    ]
+    top_models = [
+        {
+            "model": item.get("key"),
+            "credits": (item.get("shadow_credits") or {}).get("total"),
+        }
+        for item in by_model[:2]
+    ]
+    top_phases = [
+        {
+            "phase": item.get("key"),
+            "credits": (item.get("shadow_credits") or {}).get("total"),
+        }
+        for item in by_phase[:2]
+    ]
 
     return {
         "top_waste": top_waste,
-        "actions": actions[:3],
+        "basis": basis,
+        "project_credits": (summary.get("shadow_credits") or {}).get("total") if isinstance(summary.get("shadow_credits"), dict) else None,
+        "event_count": summary.get("event_count"),
+        "priced_event_count": summary.get("priced_event_count"),
+        "shares": {
+            "fresh_input": shares.get("fresh_input"),
+            "cached_input": shares.get("cached_input"),
+            "output": shares.get("output"),
+            "child_agents": shares.get("child_agents"),
+        },
+        "top_agents": top_agents,
+        "top_models": top_models,
+        "top_phases": top_phases,
+        "unpriced_models": summary.get("unpriced_models"),
     }
 
 
@@ -968,7 +994,7 @@ def estimate_text_tokens(text: str) -> int:
 def overhead_report(summary: Mapping[str, Any]) -> dict[str, Any]:
     summary_json = json.dumps(summary, sort_keys=True, separators=(",", ":"))
     hint_json = json.dumps(efficiency_hint(summary), sort_keys=True, separators=(",", ":"))
-    advice_json = json.dumps(efficiency_advice(summary), sort_keys=True, separators=(",", ":"))
+    report_json = json.dumps(efficiency_report(summary), sort_keys=True, separators=(",", ":"))
     return {
         "host_side": {
             "model_tokens_for_collection": 0,
@@ -983,12 +1009,12 @@ def overhead_report(summary: Mapping[str, Any]) -> dict[str, Any]:
                 "bytes": len(hint_json.encode("utf-8")),
                 "approx_tokens": estimate_text_tokens(hint_json),
             },
-            "efficiency_advice_json": {
-                "bytes": len(advice_json.encode("utf-8")),
-                "approx_tokens": estimate_text_tokens(advice_json),
+            "efficiency_report_json": {
+                "bytes": len(report_json.encode("utf-8")),
+                "approx_tokens": estimate_text_tokens(report_json),
             },
         },
-        "recommended_injection": "efficiency_advice_json",
+        "recommended_injection": "efficiency_report_json",
     }
 
 
@@ -1022,11 +1048,34 @@ def render_summary_text(summary: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def render_advice_text(advice: Mapping[str, Any]) -> str:
-    actions = advice.get("actions") if isinstance(advice.get("actions"), list) else []
-    lines = [f"top_waste={advice.get('top_waste')}"]
-    for index, action in enumerate(actions, start=1):
-        lines.append(f"action_{index}={action}")
+def render_report_text(report: Mapping[str, Any]) -> str:
+    shares = report.get("shares") if isinstance(report.get("shares"), dict) else {}
+    basis = report.get("basis") if isinstance(report.get("basis"), dict) else {}
+    top_agents = report.get("top_agents") if isinstance(report.get("top_agents"), list) else []
+    lines = [
+        f"top_waste={report.get('top_waste')}",
+        f"project_credits={_coerce_float(report.get('project_credits')) or 0.0:.4f}",
+        f"event_count={report.get('event_count', 0)} priced_event_count={report.get('priced_event_count', 0)}",
+        "shares"
+        f" fresh_input={_coerce_float(shares.get('fresh_input')) or 0.0:.4f}"
+        f" cached_input={_coerce_float(shares.get('cached_input')) or 0.0:.4f}"
+        f" output={_coerce_float(shares.get('output')) or 0.0:.4f}"
+        f" child_agents={_coerce_float(shares.get('child_agents')) or 0.0:.4f}",
+    ]
+    if basis:
+        basis_parts = " ".join(
+            f"{key}={_coerce_float(value):.4f}" if _coerce_float(value) is not None else f"{key}={value}"
+            for key, value in basis.items()
+        )
+        lines.append(f"basis {basis_parts}")
+    for index, item in enumerate(top_agents[:2], start=1):
+        lines.append(
+            f"top_agent_{index}"
+            f" key={item.get('agent')}"
+            f" credits={_coerce_float(item.get('credits')) or 0.0:.4f}"
+            f" input_tokens={_coerce_int(item.get('input_tokens')) or 0}"
+            f" output_tokens={_coerce_int(item.get('output_tokens')) or 0}"
+        )
     return "\n".join(lines)
 
 
@@ -1100,10 +1149,10 @@ def _build_parser() -> argparse.ArgumentParser:
     hint.add_argument("--project-id")
     hint.add_argument("--format", choices=("text", "json"), default="json")
 
-    advice = subparsers.add_parser("efficiency-advice", help="Render a tiny actionable efficiency advice block.")
-    advice.add_argument("--ledger", required=True)
-    advice.add_argument("--project-id")
-    advice.add_argument("--format", choices=("text", "json"), default="json")
+    report = subparsers.add_parser("efficiency-report", help="Render a compact factual efficiency report block.")
+    report.add_argument("--ledger", required=True)
+    report.add_argument("--project-id")
+    report.add_argument("--format", choices=("text", "json"), default="json")
 
     overhead = subparsers.add_parser("overhead-report", help="Estimate prompt overhead for tracker outputs.")
     overhead.add_argument("--ledger", required=True)
@@ -1212,12 +1261,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(render_summary_text({"shadow_credits": {"total": hint.get("project_credits") or 0.0}, "shares": {"fresh_input": hint.get("fresh_input_share"), "output": hint.get("output_share"), "child_agents": hint.get("child_agent_share"), "cached_input": None}, "top_waste": hint.get("top_waste"), "event_count": hint.get("priced_event_count"), "priced_event_count": hint.get("priced_event_count"), "by_agent": [{"key": hint.get("top_agent"), "shadow_credits": {"total": hint.get("top_agent_credits") or 0.0}}] if hint.get("top_agent") else [], "unpriced_models": hint.get("unpriced_models") or []}))
         return 0
 
-    if args.command == "efficiency-advice":
-        advice = efficiency_advice(summarize_usage_events(load_usage_events(Path(args.ledger)), project_id=args.project_id))
+    if args.command == "efficiency-report":
+        report = efficiency_report(summarize_usage_events(load_usage_events(Path(args.ledger)), project_id=args.project_id))
         if args.format == "json":
-            print(json.dumps(advice, indent=2, sort_keys=True))
+            print(json.dumps(report, indent=2, sort_keys=True))
         else:
-            print(render_advice_text(advice))
+            print(render_report_text(report))
         return 0
 
     if args.command == "overhead-report":

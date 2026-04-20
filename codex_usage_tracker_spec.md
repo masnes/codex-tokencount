@@ -139,20 +139,33 @@ Charging model:
 
 This block should be small enough to inject without becoming its own cost center.
 
-For action selection, the tracker should also support an even smaller advice block:
+For descriptive feedback, the tracker should support an even smaller factual report:
 
 ```json
 {
   "top_waste": "delegation_heavy",
-  "actions": [
-    "avoid new child agents unless the task is clearly parallel and disjoint",
-    "prefer continuing in the current thread for the next step",
-    "if a child is necessary, require terse outputs"
+  "basis": {
+    "child_agent_share": 1.0
+  },
+  "project_credits": 2.35321325,
+  "shares": {
+    "fresh_input": 0.3744799796618517,
+    "cached_input": 0.28679083801691163,
+    "output": 0.3387291823212368,
+    "child_agents": 1.0
+  },
+  "top_agents": [
+    {
+      "agent": "Mill",
+      "credits": 1.3508479999999998,
+      "input_tokens": 264376,
+      "output_tokens": 3526
+    }
   ]
 }
 ```
 
-This advice block is the preferred feedback path when you want the model to change behavior rather than inspect raw accounting detail.
+This report is the preferred feedback path when you want the model to retain agency while still seeing the relevant evidence.
 
 ## CLI surface
 
@@ -162,7 +175,7 @@ Current canonical entrypoints:
 - `python codex_usage_tracker.py ingest-state-sqlite ...`
 - `python codex_usage_tracker.py summary ...`
 - `python codex_usage_tracker.py efficiency-hint ...`
-- `python codex_usage_tracker.py efficiency-advice ...`
+- `python codex_usage_tracker.py efficiency-report ...`
 - `python codex_usage_tracker.py overhead-report ...`
 - `python codex_usage_tracker.py probe-sources ...`
 - `./tools/codex-usage ...`
@@ -186,7 +199,7 @@ The tracker should separate overhead into two buckets:
 `overhead-report` should estimate the prompt overhead for at least:
 - full summary JSON
 - efficiency hint JSON
-- efficiency advice JSON
+- efficiency report JSON
 
 When a tokenizer is unavailable, a cheap approximation is acceptable for prompt-token estimation. The goal is comparative guidance, not invoice precision.
 
