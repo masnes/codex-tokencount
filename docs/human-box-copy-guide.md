@@ -8,6 +8,11 @@ It is not the orientation doc for the Codex instance inside the box.
 For the Codex instance, point it at:
 - `docs/in-box-codex-guide.md`
 
+Goal:
+- copy the smallest useful bundle
+- verify that the copied wrappers can see local telemetry on the target machine
+- give the in-box Codex instance one clear orientation file instead of a mixed operator/model handoff
+
 ## Supported copy layouts
 
 ### Whole repo
@@ -18,6 +23,10 @@ You usually do not need to copy:
 - `_codex_out/`
 - `archive/governor-spike-20260420/`
 - the source machine's `~/.codex/state_5.sqlite`
+
+Important:
+- the tracker should read telemetry from the target machine
+- do not carry over the source machine's Codex state DB as if it were live local telemetry
 
 ### Minimal portable tracker: repo-style layout
 
@@ -38,6 +47,12 @@ If you want a tiny bundle in one directory, put these files side by side:
 - `codex-usage-checkpoint`
 
 The wrappers support this flat copied layout directly.
+
+## Which layout to choose
+
+- use whole repo if you want the broader context package and surrounding docs
+- use repo-style minimal bundle if you want only the tracker but still want a clean `tools/` layout
+- use flat layout if you want the smallest portable copy and do not care about repo structure
 
 ## Optional files to carry
 
@@ -61,6 +76,11 @@ Bring these if you want tests on the target side:
 - `test_codex_usage_checkpoint.py`
 
 ## First checks after copy
+
+Pick the command prefix that matches what you copied:
+
+- repo-style: `./tools/codex-usage` and `./tools/codex-usage-checkpoint`
+- flat bundle: `./codex-usage` and `./codex-usage-checkpoint`
 
 Repo-style layout:
 
@@ -94,14 +114,16 @@ Or override it per command:
 ## Minimal handoff to the Codex instance
 
 If the full repo is present:
-- point Codex at `docs/in-box-codex-guide.md`
-- optionally also point it at `START_HERE_PROMPT.txt`
+- point Codex at `docs/in-box-codex-guide.md` first
+- only point it at `START_HERE_PROMPT.txt` too if you want the broader repo context, not just tracker usage
 
 If only the minimal tracker bundle is present:
-- point Codex at `docs/in-box-codex-guide.md` if you copied it
-- otherwise tell it this is a local Codex usage tracker with `codex-usage` and `codex-usage-checkpoint` as the entrypoints
+- copy `docs/in-box-codex-guide.md` with the bundle if you want a clean cold-start handoff
+- otherwise tell it exactly which command prefix exists and that this is a local Codex usage tracker with `codex-usage` and `codex-usage-checkpoint` as the entrypoints
 
 ## Quick operator commands
+
+Use the command prefix that matches the copied layout.
 
 Repo-wide checkpoint:
 

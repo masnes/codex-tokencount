@@ -15,8 +15,8 @@ What this package contains:
 - `test_codex_usage_tracker.py` — focused tests for the new tracker.
 - `process_learnings.md` — rolling notes on process lessons from recent runs.
 - `docs/startup-manifest.md` — compact first-read manifest for bootstrap runs.
-- `docs/human-box-copy-guide.md` — exact copy sets and first-run flow for the human moving this tracker into another box or Codex environment.
-- `docs/in-box-codex-guide.md` — first-read orientation for a Codex instance inside a copied box that has no prior conversation context.
+- `docs/human-box-copy-guide.md` — operator doc for the human copying this tracker into another box or Codex environment.
+- `docs/in-box-codex-guide.md` — model-facing doc for a Codex instance inside a copied box that has no prior conversation context.
 - `docs/codex-box.md` — separate operational note for the Podman shim.
 - `tools/codex-usage` — thin wrapper around `codex_usage_tracker.py`, resilient to either a repo-root `tools/` layout or a flat copied bundle.
 - `tools/codex-usage-checkpoint` — one-command wrapper for `mark`, `snapshot`, filtered `window` tracker flows, and `smoke-test`.

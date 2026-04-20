@@ -2,6 +2,11 @@
 
 Use this if you are Codex inside a box or copied environment and you do not know the prior conversation.
 
+Goal:
+- identify which tracker entrypoints exist in this environment
+- validate that local telemetry is visible
+- get to a useful usage report before reading broader repo context
+
 ## What this package is
 
 This package is a local Codex usage tracker.
@@ -30,20 +35,33 @@ If you have the repo-style layout, the entrypoints are:
 - `./tools/codex-usage`
 - `./tools/codex-usage-checkpoint`
 
-## First move
+## Choose the command prefix first
 
-Start by validating that the wrappers resolve and that local telemetry is visible.
+Use the pair that exists in this environment.
+These are just shell helpers for the examples below; if you do not set them, substitute the literal command paths instead.
 
 Repo-style layout:
 
 ```bash
-./tools/codex-usage-checkpoint smoke-test
+USAGE=./tools/codex-usage
+CHECKPOINT=./tools/codex-usage-checkpoint
 ```
 
-Flat layout:
+Flat copied layout:
 
 ```bash
-./codex-usage-checkpoint smoke-test
+USAGE=./codex-usage
+CHECKPOINT=./codex-usage-checkpoint
+```
+
+If you are not sure which layout you have, inspect the current directory first and pick the matching pair.
+
+## First move
+
+Start by validating that the wrappers resolve and that local telemetry is visible.
+
+```bash
+$CHECKPOINT smoke-test
 ```
 
 If that fails because the telemetry path is wrong, try:
@@ -54,32 +72,34 @@ export CODEX_USAGE_SQLITE="${CODEX_HOME:-$HOME/.codex}/state_5.sqlite"
 
 Then rerun `smoke-test`.
 
+Do not assume the source machine's state DB was copied over intentionally. The tracker should read telemetry from this machine.
+
 ## Core commands
 
 Probe likely telemetry sources:
 
 ```bash
-./tools/codex-usage probe-sources
+$USAGE probe-sources
 ```
 
 Repo-wide checkpoint:
 
 ```bash
-./tools/codex-usage-checkpoint snapshot
+$CHECKPOINT snapshot
 ```
 
 Filtered child-agent slice:
 
 ```bash
-./tools/codex-usage-checkpoint mark
-./tools/codex-usage-checkpoint window
+$CHECKPOINT mark
+$CHECKPOINT window
 ```
 
 Filtered post-mark current-task slice:
 
 ```bash
-./tools/codex-usage-checkpoint mark
-./tools/codex-usage-checkpoint window --cutoff-mode updated
+$CHECKPOINT mark
+$CHECKPOINT window --cutoff-mode updated
 ```
 
 ## How to interpret the two window modes
@@ -117,9 +137,9 @@ Human-readable text output includes per-model lines with:
 Useful commands:
 
 ```bash
-./tools/codex-usage summary --ledger /path/to/ledger.jsonl --project-id my-project --format text
-./tools/codex-usage efficiency-report --ledger /path/to/ledger.jsonl --project-id my-project --format text
-./tools/codex-usage overhead-report --ledger /path/to/ledger.jsonl --project-id my-project --format json
+$USAGE summary --ledger /path/to/ledger.jsonl --project-id my-project --format text
+$USAGE efficiency-report --ledger /path/to/ledger.jsonl --project-id my-project --format text
+$USAGE overhead-report --ledger /path/to/ledger.jsonl --project-id my-project --format json
 ```
 
 ## How to use the outputs
@@ -144,6 +164,9 @@ Then these are the next useful context files:
 
 Treat:
 - `archive/governor-spike-20260420/` as historical context only
+
+Do not read the whole repo by default just because it exists.
+If the immediate task is tracker usage, start with the tracker commands first and only widen context if the task demands it.
 
 ## Working assumptions
 

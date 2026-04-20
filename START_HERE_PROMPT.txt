@@ -1,7 +1,7 @@
 You are picking up work for Michael.
 
 Before doing anything substantial:
-1. If `docs/in-box-codex-guide.md` exists because this package was copied into a fresh box, read that first.
+1. If `docs/in-box-codex-guide.md` exists because this package was copied into a fresh box, read that first. It is the model-facing orientation doc for the copied environment.
 2. Read `AGENTS.md`.
 3. Read `HANDOFF.md`.
 4. Read `user_model.json`.
