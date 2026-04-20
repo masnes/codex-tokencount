@@ -2,6 +2,8 @@
 
 Purpose: give Codex durable context plus a project-scoped token-usage tracker that can reason about efficiency without routing ordinary local work through the paid API.
 
+The tracker records model identity with each usage event and carries a local pricing snapshot alongside the token counts, so model-specific shadow-credit math stays visible in the ledger instead of being hidden inside summaries.
+
 What this package contains:
 - `AGENTS.md` — compact durable operating guidance for Codex.
 - `HANDOFF.md` — richer narrative handoff with priorities, active threads, and process rules.

@@ -146,6 +146,36 @@ def _rate_card_entry(model: str, rate_card: Mapping[str, Mapping[str, float | No
     return dict(card[normalized]) if normalized in card else None
 
 
+def pricing_metadata_for_model(
+    model: str,
+    *,
+    rate_card: Mapping[str, Mapping[str, float | None]] | None = None,
+    token_unit: int = RATE_CARD_TOKEN_UNIT,
+) -> dict[str, Any]:
+    model_key = _rate_card_key(model)
+    entry = _rate_card_entry(model, rate_card)
+    if entry is None:
+        return {
+            "rate_card_model": model_key,
+            "pricing_state": "missing_rate_card_entry",
+            "token_unit": token_unit,
+            "input_rate": None,
+            "cached_input_rate": None,
+            "output_rate": None,
+        }
+    pricing_state = "priced"
+    if entry["input"] is None or entry["cached_input"] is None or entry["output"] is None:
+        pricing_state = "unpriced"
+    return {
+        "rate_card_model": model_key,
+        "pricing_state": pricing_state,
+        "token_unit": token_unit,
+        "input_rate": entry["input"],
+        "cached_input_rate": entry["cached_input"],
+        "output_rate": entry["output"],
+    }
+
+
 def normalize_token_usage(payload: Mapping[str, Any]) -> dict[str, int]:
     input_details = payload.get("input_tokens_details")
     if not isinstance(input_details, dict):
@@ -193,20 +223,21 @@ def shadow_credits_for_usage(
     token_unit: int = RATE_CARD_TOKEN_UNIT,
 ) -> dict[str, Any]:
     tokens = normalize_token_usage(usage)
+    pricing = pricing_metadata_for_model(model, rate_card=rate_card, token_unit=token_unit)
     entry = _rate_card_entry(model, rate_card)
-    if entry is None:
+    if pricing["pricing_state"] == "missing_rate_card_entry" or entry is None:
         return {
-            "pricing_state": "missing_rate_card_entry",
-            "token_unit": token_unit,
+            "pricing_state": pricing["pricing_state"],
+            "token_unit": pricing["token_unit"],
             "fresh_input": None,
             "cached_input": None,
             "output": None,
             "total": None,
         }
-    if entry["input"] is None or entry["cached_input"] is None or entry["output"] is None:
+    if pricing["pricing_state"] == "unpriced":
         return {
-            "pricing_state": "unpriced",
-            "token_unit": token_unit,
+            "pricing_state": pricing["pricing_state"],
+            "token_unit": pricing["token_unit"],
             "fresh_input": None,
             "cached_input": None,
             "output": None,
@@ -267,6 +298,7 @@ def build_usage_event(
     token_unit: int = RATE_CARD_TOKEN_UNIT,
 ) -> dict[str, Any]:
     normalized_tokens = normalize_token_usage(usage)
+    pricing = pricing_metadata_for_model(model, rate_card=rate_card, token_unit=token_unit)
     shadow = shadow_credits_for_usage(model, normalized_tokens, rate_card=rate_card, token_unit=token_unit)
     event = {
         "kind": "usage_delta",
@@ -279,6 +311,7 @@ def build_usage_event(
         "turn_id": turn_id,
         "model": model,
         "tokens": normalized_tokens,
+        "pricing": pricing,
         "shadow_credits": shadow,
         "source": source,
         "source_path": source_path,
@@ -900,6 +933,16 @@ def summarize_usage_events(
             if shadow.get("pricing_state") == "priced":
                 for key in ("fresh_input", "cached_input", "output", "total"):
                     bucket["shadow_credits"][key] += _coerce_float(shadow.get(key)) or 0.0
+            if bucket_name is by_model and "pricing" not in bucket:
+                pricing = event.get("pricing") if isinstance(event.get("pricing"), dict) else pricing_metadata_for_model(model)
+                bucket["pricing"] = {
+                    "rate_card_model": pricing.get("rate_card_model"),
+                    "pricing_state": pricing.get("pricing_state"),
+                    "token_unit": pricing.get("token_unit"),
+                    "input_rate": pricing.get("input_rate"),
+                    "cached_input_rate": pricing.get("cached_input_rate"),
+                    "output_rate": pricing.get("output_rate"),
+                }
 
     total_credits = credit_totals["total"]
     fresh_input_share = (credit_totals["fresh_input"] / total_credits) if total_credits else None
@@ -1001,6 +1044,7 @@ def efficiency_report(summary: Mapping[str, Any]) -> dict[str, Any]:
         {
             "model": item.get("key"),
             "credits": (item.get("shadow_credits") or {}).get("total"),
+            "pricing": item.get("pricing"),
         }
         for item in by_model[:2]
     ]

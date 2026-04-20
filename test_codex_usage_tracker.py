@@ -41,6 +41,56 @@ class CodexUsageTrackerTests(unittest.TestCase):
         self.assertAlmostEqual(credits["cached_input"], 200 * 1.875 / 1_000_000)
         self.assertAlmostEqual(credits["output"], 100 * 113 / 1_000_000)
 
+    def test_build_usage_event_embeds_model_pricing_metadata(self) -> None:
+        event = build_usage_event(
+            project_id="project-a",
+            session_id="session-a",
+            agent_id="primary",
+            model="GPT-5.4-Mini",
+            usage={"input_tokens": 1000, "cached_input_tokens": 200, "output_tokens": 100},
+        )
+
+        self.assertEqual(event["model"], "GPT-5.4-Mini")
+        self.assertEqual(event["pricing"]["rate_card_model"], "gpt-5.4-mini")
+        self.assertEqual(event["pricing"]["pricing_state"], "priced")
+        self.assertEqual(event["pricing"]["input_rate"], 18.75)
+        self.assertEqual(event["pricing"]["cached_input_rate"], 1.875)
+        self.assertEqual(event["pricing"]["output_rate"], 113.0)
+
+    def test_build_usage_event_marks_unpriced_and_image_models(self) -> None:
+        image_event = build_usage_event(
+            project_id="project-a",
+            session_id="session-a",
+            agent_id="primary",
+            model="GPT-Image-1.5",
+            usage={"input_tokens": 1000, "cached_input_tokens": 200, "output_tokens": 100},
+        )
+        text_image_event = build_usage_event(
+            project_id="project-a",
+            session_id="session-a",
+            agent_id="primary",
+            model="GPT-Image-5.1",
+            usage={"input_tokens": 1000, "cached_input_tokens": 200, "output_tokens": 100},
+        )
+        spark_event = build_usage_event(
+            project_id="project-a",
+            session_id="session-b",
+            agent_id="primary",
+            model="GPT-5.3-Codex-Spark",
+            usage={"input_tokens": 1000, "cached_input_tokens": 200, "output_tokens": 100},
+        )
+
+        self.assertEqual(image_event["pricing"]["input_rate"], 200.0)
+        self.assertEqual(image_event["pricing"]["cached_input_rate"], 50.0)
+        self.assertEqual(image_event["pricing"]["output_rate"], 800.0)
+        self.assertEqual(text_image_event["pricing"]["input_rate"], 125.0)
+        self.assertEqual(text_image_event["pricing"]["cached_input_rate"], 31.25)
+        self.assertEqual(text_image_event["pricing"]["output_rate"], 250.0)
+        self.assertEqual(image_event["shadow_credits"]["pricing_state"], "priced")
+        self.assertEqual(spark_event["pricing"]["pricing_state"], "unpriced")
+        self.assertIsNone(spark_event["pricing"]["input_rate"])
+        self.assertEqual(spark_event["shadow_credits"]["pricing_state"], "unpriced")
+
     def test_events_from_jsonl_converts_cumulative_token_count_to_deltas(self) -> None:
         with TemporaryDirectory() as tmpdir:
             source = Path(tmpdir) / "rollout.jsonl"
@@ -212,6 +262,9 @@ class CodexUsageTrackerTests(unittest.TestCase):
         self.assertEqual(summary["tokens"]["input_tokens"], 1500)
         self.assertEqual(summary["by_agent"][0]["key"], "primary")
         self.assertEqual(summary["by_model"][0]["key"], "gpt-5.4-mini")
+        self.assertEqual(summary["by_model"][0]["pricing"]["input_rate"], 18.75)
+        self.assertEqual(summary["by_model"][0]["pricing"]["cached_input_rate"], 1.875)
+        self.assertEqual(summary["by_model"][0]["pricing"]["output_rate"], 113.0)
 
     def test_efficiency_hint_flags_delegation_heavy_projects(self) -> None:
         events = [
@@ -263,6 +316,8 @@ class CodexUsageTrackerTests(unittest.TestCase):
         self.assertFalse(report["window"]["child_only"])
         self.assertEqual(report["window"]["session_count"], 1)
         self.assertEqual(report["top_agents"][0]["agent"], "worker-1")
+        self.assertEqual(report["top_models"][0]["pricing"]["input_rate"], 62.5)
+        self.assertEqual(report["top_models"][0]["pricing"]["output_rate"], 375.0)
 
     def test_overhead_report_prefers_report_over_full_summary(self) -> None:
         events = [

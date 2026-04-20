@@ -68,6 +68,14 @@ Interpret the probe output this way:
     "reasoning_tokens": 60,
     "total_tokens": 2020
   },
+  "pricing": {
+    "rate_card_model": "gpt-5.4-mini",
+    "pricing_state": "priced",
+    "token_unit": 1000000,
+    "input_rate": 18.75,
+    "cached_input_rate": 1.875,
+    "output_rate": 113.0
+  },
   "shadow_credits": {
     "pricing_state": "priced",
     "token_unit": 1000000,
@@ -98,6 +106,7 @@ The rollup should calculate:
 - output share of shadow credits
 - child-agent share of shadow credits
 - top waste label
+- per-model pricing metadata derived from the local rate card, so model totals can be read with their input/cached/output rates in the same structure
 
 ## Waste heuristics
 
