@@ -15,6 +15,7 @@ What this package contains:
 - `test_codex_usage_tracker.py` — focused tests for the new tracker.
 - `process_learnings.md` — rolling notes on process lessons from recent runs.
 - `docs/startup-manifest.md` — compact first-read manifest for bootstrap runs.
+- `docs/consumer-guide.md` — exact copy sets and first-run flow for moving the tracker into another box or Codex environment.
 - `docs/codex-box.md` — separate operational note for the Podman shim.
 - `tools/codex-usage` — thin wrapper around `codex_usage_tracker.py`, resilient to either a repo-root `tools/` layout or a flat copied bundle.
 - `tools/codex-usage-checkpoint` — one-command wrapper for `mark`, `snapshot`, filtered `window` tracker flows, and `smoke-test`.
@@ -30,6 +31,7 @@ What this package does NOT contain:
 Suggested placement:
 - Put `AGENTS.md` in `~/.codex/AGENTS.md` for personal defaults, or in the repo root for project-local behavior.
 - Keep `HANDOFF.md`, `user_model.json`, `codex_budget_policy.md`, `codex_usage_tracker_spec.md`, `process_learnings.md`, and `docs/startup-manifest.md` nearby and point Codex at them explicitly on first use.
+- If you are copying only the tracker into another box or Codex environment, use [docs/consumer-guide.md](/workspace/docs/consumer-guide.md) for the supported copy layouts and first-run checks.
 
 Suggested startup pattern:
 1. Place `AGENTS.md` where Codex will auto-read it.
