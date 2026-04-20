@@ -32,7 +32,7 @@ Suggested startup pattern:
 1. Place `AGENTS.md` where Codex will auto-read it.
 2. Start Codex in the target repo.
 3. Use `docs/startup-manifest.md` when you want the cheaper compact bootstrap path first.
-4. If you are instrumenting a project, use `./tools/codex-usage --help` and keep a local JSONL ledger per project.
+4. If you are instrumenting a project, start with `./tools/codex-usage probe-sources`, then use `ingest-jsonl` or `ingest-state-sqlite` and keep a local JSONL ledger per project.
 5. For manual onboarding, paste `START_HERE_PROMPT.txt`.
 6. Let Codex summarize its understanding before it starts changing things.
 

@@ -132,8 +132,10 @@ This block should be small enough to inject without becoming its own cost center
 Current canonical entrypoints:
 - `python codex_usage_tracker.py record-event ...`
 - `python codex_usage_tracker.py ingest-jsonl ...`
+- `python codex_usage_tracker.py ingest-state-sqlite ...`
 - `python codex_usage_tracker.py summary ...`
 - `python codex_usage_tracker.py efficiency-hint ...`
+- `python codex_usage_tracker.py probe-sources ...`
 - `./tools/codex-usage ...`
 
 ## Archive boundary

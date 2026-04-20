@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,7 +9,9 @@ from codex_usage_tracker import (
     build_usage_event,
     efficiency_hint,
     events_from_jsonl,
+    events_from_state_sqlite,
     load_usage_events,
+    probe_sources,
     shadow_credits_for_usage,
     summarize_usage_events,
 )
@@ -160,6 +163,165 @@ class CodexUsageTrackerTests(unittest.TestCase):
             loaded = load_usage_events(ledger)
             self.assertEqual(len(loaded), 1)
             self.assertEqual(loaded[0]["project_id"], "project-a")
+
+    def test_probe_sources_detects_importable_rollout_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "rollout.jsonl"
+            source.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-20T19:00:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 1000,
+                                    "cached_input_tokens": 100,
+                                    "output_tokens": 50,
+                                    "total_tokens": 1050,
+                                }
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            sources = probe_sources(
+                cwd=Path(tmpdir),
+                env={"CODEX_ROLLOUT_FILE": str(source)},
+            )
+
+            matching = [item for item in sources if item["path"] == str(source)]
+            self.assertEqual(len(matching), 1)
+            self.assertEqual(matching[0]["kind"], "token_count_jsonl")
+            self.assertTrue(matching[0]["importable"])
+
+    def test_events_from_state_sqlite_uses_thread_metadata(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parent_rollout = root / "parent-rollout.jsonl"
+            child_rollout = root / "child-rollout.jsonl"
+            parent_rollout.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-20T19:00:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 1000,
+                                    "cached_input_tokens": 100,
+                                    "output_tokens": 50,
+                                    "total_tokens": 1050,
+                                }
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            child_rollout.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-20T19:01:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 300,
+                                    "cached_input_tokens": 0,
+                                    "output_tokens": 40,
+                                    "total_tokens": 340,
+                                }
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            sqlite_path = root / "state.sqlite"
+            connection = sqlite3.connect(sqlite_path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE threads (
+                        id TEXT PRIMARY KEY,
+                        rollout_path TEXT NOT NULL,
+                        cwd TEXT NOT NULL,
+                        model TEXT,
+                        agent_nickname TEXT,
+                        agent_role TEXT,
+                        tokens_used INTEGER NOT NULL DEFAULT 0,
+                        created_at_ms INTEGER,
+                        updated_at_ms INTEGER,
+                        archived INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE thread_spawn_edges (
+                        parent_thread_id TEXT NOT NULL,
+                        child_thread_id TEXT NOT NULL PRIMARY KEY,
+                        status TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO threads (id, rollout_path, cwd, model, agent_nickname, agent_role, tokens_used, created_at_ms, updated_at_ms, archived)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    ("thread-parent", str(parent_rollout), "/workspace", "gpt-5.4-mini", None, None, 1050, 1, 2),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO threads (id, rollout_path, cwd, model, agent_nickname, agent_role, tokens_used, created_at_ms, updated_at_ms, archived)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    ("thread-child", str(child_rollout), "/workspace", "gpt-5.4-mini", "worker-1", "editing", 340, 3, 4),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status)
+                    VALUES (?, ?, ?)
+                    """,
+                    ("thread-parent", "thread-child", "completed"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            events = events_from_state_sqlite(
+                sqlite_path,
+                project_id="project-a",
+                cwd_prefix="/workspace",
+            )
+
+            self.assertEqual(len(events), 2)
+            parent = [event for event in events if event["session_id"] == "thread-parent"][0]
+            child = [event for event in events if event["session_id"] == "thread-child"][0]
+            self.assertEqual(parent["agent_id"], "primary")
+            self.assertEqual(child["agent_id"], "worker-1")
+            self.assertEqual(child["parent_agent_id"], "primary")
+            self.assertEqual(child["phase"], "editing")
+
+            sources = probe_sources(
+                cwd=root,
+                env={"CODEX_HOME": str(root)},
+            )
+            rollout_matches = [item for item in sources if item["path"] == str(child_rollout)]
+            self.assertEqual(len(rollout_matches), 1)
+            self.assertIn(rollout_matches[0]["kind"], {"rollout_jsonl", "token_count_jsonl"})
+            self.assertTrue(rollout_matches[0]["importable"])
 
 
 if __name__ == "__main__":

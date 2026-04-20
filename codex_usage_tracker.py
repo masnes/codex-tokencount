@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,6 +96,26 @@ def _append_jsonl(path: Path, records: Sequence[dict[str, Any]]) -> None:
         for record in records:
             handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
             handle.write("\n")
+
+
+def _load_jsonl_preview(path: Path, *, limit: int = 5) -> list[dict[str, Any]]:
+    documents: list[dict[str, Any]] = []
+    if not path.exists():
+        return documents
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                documents.append(parsed)
+            if len(documents) >= limit:
+                break
+    return documents
 
 
 def _rate_card_key(model: str) -> str:
@@ -284,6 +306,311 @@ def _usage_delta_from_cumulative(current: Mapping[str, Any], previous: Mapping[s
     for key in current_tokens:
         delta[key] = max(current_tokens[key] - previous_tokens.get(key, 0), 0)
     return delta
+
+
+def _walk_candidate_files(directory: Path, *, max_depth: int = 2, max_files: int = 40) -> list[Path]:
+    if not directory.exists() or not directory.is_dir():
+        return []
+
+    results: list[Path] = []
+    queue: list[tuple[Path, int]] = [(directory, 0)]
+    seen: set[Path] = set()
+    while queue and len(results) < max_files:
+        current, depth = queue.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        try:
+            entries = sorted(current.iterdir(), key=lambda item: item.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.is_file() and entry.suffix in {".jsonl", ".sqlite"}:
+                results.append(entry)
+                if len(results) >= max_files:
+                    break
+            elif entry.is_dir() and depth < max_depth:
+                queue.append((entry, depth + 1))
+    return results
+
+
+def _load_threads_from_state_sqlite(
+    path: Path,
+    *,
+    cwd_prefix: str | None = None,
+    max_threads: int | None = None,
+) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+
+    try:
+        connection.row_factory = sqlite3.Row
+        table_row = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'threads'"
+        ).fetchone()
+        if table_row is None:
+            return []
+
+        parent_map: dict[str, str] = {}
+        edges_row = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'thread_spawn_edges'"
+        ).fetchone()
+        if edges_row is not None:
+            for row in connection.execute("SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges"):
+                parent_map[str(row["child_thread_id"])] = str(row["parent_thread_id"])
+
+        query = (
+            "SELECT id, rollout_path, cwd, model, agent_nickname, agent_role, tokens_used, "
+            "created_at_ms, updated_at_ms, archived "
+            "FROM threads"
+        )
+        params: list[Any] = []
+        where_clauses = ["archived = 0"]
+        if cwd_prefix:
+            where_clauses.append("cwd LIKE ?")
+            params.append(f"{cwd_prefix}%")
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+        query += " ORDER BY updated_at_ms DESC, id DESC"
+        if max_threads is not None:
+            query += " LIMIT ?"
+            params.append(max_threads)
+
+        threads: list[dict[str, Any]] = []
+        for row in connection.execute(query, params):
+            row_dict = dict(row)
+            row_dict["parent_thread_id"] = parent_map.get(str(row["id"]))
+            threads.append(row_dict)
+        return threads
+    except sqlite3.Error:
+        return []
+    finally:
+        connection.close()
+
+
+def _thread_agent_id(thread: Mapping[str, Any]) -> str:
+    nickname = _coerce_str(thread.get("agent_nickname"))
+    if nickname:
+        return nickname
+    role = _coerce_str(thread.get("agent_role"))
+    if role:
+        return role
+    thread_id = _coerce_str(thread.get("id")) or "unknown"
+    if thread.get("parent_thread_id") is None:
+        return "primary"
+    return f"thread-{thread_id[:8]}"
+
+
+def _probe_rollouts_from_state_sqlite(path: Path, *, max_threads: int = 10) -> list[dict[str, Any]]:
+    threads = _load_threads_from_state_sqlite(path, max_threads=max_threads)
+    if not threads:
+        return []
+
+    agent_map = {str(thread["id"]): _thread_agent_id(thread) for thread in threads}
+    results: list[dict[str, Any]] = []
+    for thread in threads:
+        rollout_path = _coerce_str(thread.get("rollout_path"))
+        model = _coerce_str(thread.get("model"))
+        if not rollout_path or not model:
+            continue
+        rollout_file = Path(rollout_path)
+        if not rollout_file.exists():
+            continue
+        entry = _describe_source(rollout_file, discovered_from=f"sqlite:{path}")
+        if not entry.get("importable"):
+            entry["kind"] = "rollout_jsonl"
+            entry["importable"] = True
+            entry["confidence"] = "medium"
+        thread_id = _coerce_str(thread.get("id")) or "unknown"
+        agent_id = agent_map.get(thread_id) or _thread_agent_id(thread)
+        parent_thread_id = _coerce_str(thread.get("parent_thread_id"))
+        parent_agent_id = agent_map.get(parent_thread_id) if parent_thread_id else None
+        importability_note = str(entry.get("note") or "")
+        if entry.get("kind") == "rollout_jsonl":
+            importability_note = "SQLite thread metadata indicates this rollout file is importable even though the preview did not find usage records immediately."
+        note = (
+            f"Thread {thread_id} model={model} cwd={_coerce_str(thread.get('cwd')) or 'unknown'} "
+            f"agent={agent_id} tokens_used={_coerce_int(thread.get('tokens_used')) or 0}. "
+            f"{importability_note}"
+        )
+        entry.update(
+            {
+                "thread_id": thread_id,
+                "agent_id": agent_id,
+                "model": model,
+                "cwd": _coerce_str(thread.get("cwd")),
+                "parent_agent_id": parent_agent_id,
+                "note": note,
+            }
+        )
+        results.append(entry)
+    return results
+
+
+def _describe_source(path: Path, *, discovered_from: str) -> dict[str, Any]:
+    if path.suffix == ".sqlite":
+        threads = _load_threads_from_state_sqlite(path, max_threads=10)
+        rollout_count = sum(1 for thread in threads if _coerce_str(thread.get("rollout_path")))
+        note = "SQLite state files are discoverable but not yet ingested by this tracker."
+        if threads:
+            note = f"SQLite state file with {len(threads)} active thread(s) and {rollout_count} rollout path(s). Use ingest-state-sqlite for auto-import."
+        return {
+            "path": str(path),
+            "kind": "sqlite_state",
+            "importable": False,
+            "confidence": "low",
+            "discovered_from": discovered_from,
+            "size_bytes": path.stat().st_size if path.exists() else None,
+            "mtime": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z") if path.exists() else None,
+            "note": note,
+        }
+
+    preview = _load_jsonl_preview(path)
+    extracted = [item for item in (_extract_usage_payload(record) for record in preview) if item is not None]
+    kind = "jsonl"
+    confidence = "low"
+    note = "JSONL file found, but no recognized usage records were detected in the preview."
+    if extracted:
+        modes = {item["mode"] for item in extracted}
+        if "cumulative" in modes:
+            kind = "token_count_jsonl"
+        else:
+            kind = "usage_jsonl"
+        confidence = "high"
+        note = f"Preview found {len(extracted)} recognized usage record(s)."
+
+    stat = path.stat() if path.exists() else None
+    return {
+        "path": str(path),
+        "kind": kind,
+        "importable": kind in {"token_count_jsonl", "usage_jsonl"},
+        "confidence": confidence,
+        "discovered_from": discovered_from,
+        "preview_records": len(preview),
+        "size_bytes": stat.st_size if stat else None,
+        "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z") if stat else None,
+        "note": note,
+    }
+
+
+def probe_sources(
+    *,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    max_results: int = 20,
+) -> list[dict[str, Any]]:
+    active_env = os.environ if env is None else env
+    active_cwd = Path.cwd() if cwd is None else cwd
+
+    candidates: list[tuple[Path, str]] = []
+
+    def add_candidate(path: Path | None, discovered_from: str) -> None:
+        if path is None:
+            return
+        candidates.append((path, discovered_from))
+
+    rollout_file = _coerce_str(active_env.get("CODEX_ROLLOUT_FILE"))
+    if rollout_file:
+        add_candidate(Path(rollout_file), "env:CODEX_ROLLOUT_FILE")
+
+    for env_key in ("CODEX_OUT", "CODEX_HOME"):
+        value = _coerce_str(active_env.get(env_key))
+        if value:
+            add_candidate(Path(value), f"env:{env_key}")
+
+    add_candidate(active_cwd / "_codex_out", "cwd:_codex_out")
+    add_candidate(Path("/workspace/_codex_out"), "default:/workspace/_codex_out")
+    add_candidate(Path.home() / ".codex", "default:~/.codex")
+    add_candidate(Path("/codex-home"), "default:/codex-home")
+
+    seen_paths: set[Path] = set()
+    described: list[dict[str, Any]] = []
+    for candidate, discovered_from in candidates:
+        candidate = candidate.expanduser()
+        if candidate in seen_paths or not candidate.exists():
+            continue
+        seen_paths.add(candidate)
+        if candidate.is_file():
+            described.append(_describe_source(candidate, discovered_from=discovered_from))
+            if candidate.suffix == ".sqlite":
+                for rollout_entry in _probe_rollouts_from_state_sqlite(candidate, max_threads=max_results):
+                    rollout_path = Path(str(rollout_entry["path"]))
+                    if rollout_path in seen_paths:
+                        continue
+                    seen_paths.add(rollout_path)
+                    described.append(rollout_entry)
+            continue
+        for file_path in _walk_candidate_files(candidate):
+            if file_path in seen_paths:
+                continue
+            seen_paths.add(file_path)
+            described.append(_describe_source(file_path, discovered_from=discovered_from))
+            if file_path.suffix == ".sqlite":
+                for rollout_entry in _probe_rollouts_from_state_sqlite(file_path, max_threads=max_results):
+                    rollout_path = Path(str(rollout_entry["path"]))
+                    if rollout_path in seen_paths:
+                        continue
+                    seen_paths.add(rollout_path)
+                    described.append(rollout_entry)
+
+    def sort_key(item: Mapping[str, Any]) -> tuple[int, int, str]:
+        kind = _coerce_str(item.get("kind")) or ""
+        importable_rank = 0 if item.get("importable") else 1
+        kind_rank = 0 if kind in {"token_count_jsonl", "usage_jsonl", "rollout_jsonl"} else 1
+        mtime = _coerce_str(item.get("mtime")) or ""
+        return (importable_rank, kind_rank, mtime)
+
+    described.sort(key=sort_key, reverse=False)
+    described.sort(key=lambda item: _coerce_str(item.get("mtime")) or "", reverse=True)
+    return described[:max_results]
+
+
+def events_from_state_sqlite(
+    path: Path,
+    *,
+    project_id: str,
+    cwd_prefix: str | None = None,
+    phase: str | None = None,
+    default_model: str | None = None,
+    max_threads: int | None = None,
+    rate_card: Mapping[str, Mapping[str, float | None]] | None = None,
+    token_unit: int = RATE_CARD_TOKEN_UNIT,
+) -> list[dict[str, Any]]:
+    threads = _load_threads_from_state_sqlite(path, cwd_prefix=cwd_prefix, max_threads=max_threads)
+    if not threads:
+        return []
+
+    agent_map = {str(thread["id"]): _thread_agent_id(thread) for thread in threads}
+    events: list[dict[str, Any]] = []
+    for thread in threads:
+        rollout_path = _coerce_str(thread.get("rollout_path"))
+        model = _coerce_str(thread.get("model")) or default_model
+        if not rollout_path or not model:
+            continue
+        rollout_file = Path(rollout_path)
+        if not rollout_file.exists():
+            continue
+        thread_id = _coerce_str(thread.get("id")) or "unknown-thread"
+        parent_thread_id = _coerce_str(thread.get("parent_thread_id"))
+        thread_events = events_from_jsonl(
+            rollout_file,
+            project_id=project_id,
+            session_id=thread_id,
+            agent_id=agent_map.get(thread_id) or _thread_agent_id(thread),
+            parent_agent_id=agent_map.get(parent_thread_id) if parent_thread_id else None,
+            model=model,
+            phase=phase or _coerce_str(thread.get("agent_role")),
+            turn_id_prefix=thread_id[:8],
+            rate_card=rate_card,
+            token_unit=token_unit,
+        )
+        events.extend(thread_events)
+    return events
 
 
 def events_from_jsonl(
@@ -504,6 +831,24 @@ def render_summary_text(summary: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_probe_text(sources: Sequence[Mapping[str, Any]]) -> str:
+    if not sources:
+        return "no telemetry sources found"
+    lines: list[str] = []
+    for source in sources:
+        lines.append(
+            f"path={source.get('path')} kind={source.get('kind')} importable={bool(source.get('importable'))} confidence={source.get('confidence')} discovered_from={source.get('discovered_from')}"
+        )
+        if source.get("thread_id"):
+            lines.append(
+                f"thread_id={source.get('thread_id')} agent_id={source.get('agent_id')} parent_agent_id={source.get('parent_agent_id')} model={source.get('model')} cwd={source.get('cwd')}"
+            )
+        note = _coerce_str(source.get("note"))
+        if note:
+            lines.append(f"note={note}")
+    return "\n".join(lines)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Track project-scoped Codex usage and shadow credits.")
     subparsers = parser.add_subparsers(dest="command")
@@ -535,6 +880,15 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--phase")
     ingest.add_argument("--turn-id-prefix")
 
+    ingest_sqlite = subparsers.add_parser("ingest-state-sqlite", help="Use a Codex state SQLite file to locate rollout JSONLs and ingest them.")
+    ingest_sqlite.add_argument("--ledger", required=True)
+    ingest_sqlite.add_argument("--sqlite", required=True)
+    ingest_sqlite.add_argument("--project-id", required=True)
+    ingest_sqlite.add_argument("--cwd-prefix")
+    ingest_sqlite.add_argument("--phase")
+    ingest_sqlite.add_argument("--default-model")
+    ingest_sqlite.add_argument("--max-threads", type=int)
+
     summary = subparsers.add_parser("summary", help="Summarize a ledger.")
     summary.add_argument("--ledger", required=True)
     summary.add_argument("--project-id")
@@ -544,6 +898,11 @@ def _build_parser() -> argparse.ArgumentParser:
     hint.add_argument("--ledger", required=True)
     hint.add_argument("--project-id")
     hint.add_argument("--format", choices=("text", "json"), default="json")
+
+    probe = subparsers.add_parser("probe-sources", help="Find likely local Codex telemetry sources.")
+    probe.add_argument("--cwd")
+    probe.add_argument("--max-results", type=int, default=20)
+    probe.add_argument("--format", choices=("text", "json"), default="text")
 
     return parser
 
@@ -600,12 +959,49 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(render_summary_text(summary))
         return 0
 
+    if args.command == "ingest-state-sqlite":
+        ledger = Path(args.ledger)
+        sqlite_path = Path(args.sqlite)
+        events = events_from_state_sqlite(
+            sqlite_path,
+            project_id=args.project_id,
+            cwd_prefix=args.cwd_prefix,
+            phase=args.phase,
+            default_model=args.default_model,
+            max_threads=args.max_threads,
+        )
+        append_usage_events(ledger, events)
+        session_ids = sorted({event["session_id"] for event in events if _coerce_str(event.get("session_id"))})
+        print(
+            json.dumps(
+                {
+                    "event_count": len(events),
+                    "ledger": str(ledger),
+                    "project_id": args.project_id,
+                    "session_count": len(session_ids),
+                    "sqlite": str(sqlite_path),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
     if args.command == "efficiency-hint":
         hint = efficiency_hint(summarize_usage_events(load_usage_events(Path(args.ledger)), project_id=args.project_id))
         if args.format == "json":
             print(json.dumps(hint, indent=2, sort_keys=True))
         else:
             print(render_summary_text({"shadow_credits": {"total": hint.get("project_credits") or 0.0}, "shares": {"fresh_input": hint.get("fresh_input_share"), "output": hint.get("output_share"), "child_agents": hint.get("child_agent_share"), "cached_input": None}, "top_waste": hint.get("top_waste"), "event_count": hint.get("priced_event_count"), "priced_event_count": hint.get("priced_event_count"), "by_agent": [{"key": hint.get("top_agent"), "shadow_credits": {"total": hint.get("top_agent_credits") or 0.0}}] if hint.get("top_agent") else [], "unpriced_models": hint.get("unpriced_models") or []}))
+        return 0
+
+    if args.command == "probe-sources":
+        cwd = Path(args.cwd) if args.cwd else Path.cwd()
+        sources = probe_sources(cwd=cwd, max_results=args.max_results)
+        if args.format == "json":
+            print(json.dumps(sources, indent=2, sort_keys=True))
+        else:
+            print(render_probe_text(sources))
         return 0
 
     parser.print_help()
