@@ -2,16 +2,44 @@
 
 Project-scoped token accounting and wrapper tooling for Codex sessions.
 
-The core idea is simple: keep local telemetry separate from authoritative quota state, record per-event model metadata, and make fresh-input, cached-input, output, and reasoning costs visible enough to inform real workflow decisions.
+If you use Codex locally and want to understand the cost shape of real work by project, this repo gives you a local ledger, lightweight workflow wrappers, and a clearer split between project accounting and authoritative quota state.
 
-## Why This Repo Exists
+## What Problem This Solves
 
-- Attribute usage to a project instead of a whole Codex account.
-- Preserve model-specific token and shadow-credit detail in a local ledger.
-- Provide a low-friction `mark` / `window` / `snapshot` workflow for recent work.
-- Keep the earlier quota-governor experiment available as prior art without making it the live path.
+Codex exposes useful local telemetry, but the raw signals are awkward to use directly:
 
-## Main Components
+- usage is easy to blur across projects
+- long-lived parent threads can drown out the slice you actually care about
+- raw token counts hide the economic difference between fresh input, cached input, and output
+
+This repo turns that into a more usable workflow:
+
+1. Read local telemetry from the machine doing the work.
+2. Build a project-scoped ledger.
+3. Render compact summaries that are good enough to steer real decisions.
+
+## Who This Is For
+
+- People running Codex locally who want project-level usage visibility.
+- People experimenting with agent workflows and wanting a cheaper feedback loop than "just guess."
+- People who want a wrapper around common checkpoint flows instead of raw telemetry ingestion every time.
+
+## What This Is Not
+
+- Not OpenAI billing.
+- Not an authoritative quota source.
+- Not a hard throttle.
+- Not a reason to route ordinary local work through the API.
+
+## If You Only Read One Minute
+
+- `tools/codex-usage-checkpoint` is the main operator entrypoint.
+- `snapshot` is the fastest whole-project check.
+- `mark` + `window` is the main "what happened in this slice of work?" flow.
+- `window --cutoff-mode updated` is the right move when work stayed on an existing thread.
+- `efficiency-report` is the main compact output to feed back into Codex.
+
+## Core Components
 
 - `codex_usage_tracker.py` - ledger, ingest, summaries, efficiency hints, and efficiency reports.
 - `tools/codex-usage` - thin wrapper around the tracker CLI for repo and copied-bundle layouts.
@@ -19,36 +47,65 @@ The core idea is simple: keep local telemetry separate from authoritative quota 
 - `tools/codex-box` - Podman shim for a constrained Codex box.
 - `archive/governor-spike-20260420/` - archived quota-governor spike retained as historical context.
 
-## Quick Start
+## Fast Start
 
-1. Run the test suite.
-
-```bash
-python -m unittest -q \
-  test_codex_usage_tracker.py \
-  test_codex_usage_checkpoint.py \
-  test_codex_governor_spike.py
-```
-
-2. Inspect the CLI surface.
+1. Inspect the CLI surface.
 
 ```bash
 ./tools/codex-usage --help
 ./tools/codex-usage-checkpoint --help
 ```
 
-3. If you have a local Codex state database, validate wrapper resolution and telemetry visibility.
+2. If you have a local Codex state database, check whether the wrapper can see it.
 
 ```bash
 ./tools/codex-usage-checkpoint smoke-test --format json
 ```
 
-4. For a live cutoff workflow, mark a baseline, do the work, then inspect the window.
+3. Get a whole-project checkpoint.
+
+```bash
+./tools/codex-usage-checkpoint snapshot --format text
+```
+
+4. If you want a task-local slice, mark a baseline, do the work, then inspect the window.
 
 ```bash
 ./tools/codex-usage-checkpoint mark
 ./tools/codex-usage-checkpoint window --format text
 ```
+
+If `window` shows zero events and you expected activity, rerun with:
+
+```bash
+./tools/codex-usage-checkpoint window --cutoff-mode updated --format text
+```
+
+## How To Read The Main Workflows
+
+### `snapshot`
+
+Use this when you want the fastest whole-project picture and do not need fine-grained attribution for one recent slice.
+
+### `mark` + `window`
+
+Use this when you want to isolate recent work.
+
+- default `window` is best for newly created child sessions after `mark`
+- `window --cutoff-mode updated` is best when the work mostly happened on an already-running thread
+- rerunning `window` with the same cutoff is cumulative since that `mark`
+
+### `efficiency-report`
+
+Use this when you want the compact decision-facing output rather than the fullest accounting dump.
+
+## Choose The Right Doc
+
+- `README.md`: human overview and quickest path to value.
+- `docs/human-box-copy-guide.md`: operator guide for copying this bundle into another environment.
+- `docs/codex-box.md`: practical notes on the Podman shim and its security tradeoffs.
+- `docs/in-box-codex-guide.md`: orientation for Codex inside a copied box or tracker bundle.
+- `docs/startup-manifest.md`: compact bootstrap context for model runs.
 
 ## Public / Private Split
 
@@ -58,24 +115,18 @@ This repo is public-safe by default.
 - Put private operator context in `HANDOFF.local.md` and `user_model.local.json`; both are gitignored.
 - Treat `archive/` as technical history, not as a place to store personal notes.
 
-## Repo Map
+## Design Stance
 
-- `AGENTS.md` - tracked operating defaults for work in this repo.
-- `HANDOFF.md` - project-level context for Codex instances working here.
-- `user_model.json` - public template for operator preferences and workflow defaults.
-- `START_HERE_PROMPT.txt` - manual bootstrap prompt for a fresh Codex instance.
-- `codex_budget_policy.md` - current policy for project-scoped token observability and shadow pricing.
-- `codex_usage_tracker_spec.md` - behavior contract for the tracker and report shapes.
-- `process_learnings.md` - accumulated implementation and workflow notes.
-- `docs/startup-manifest.md` - compact bootstrap read.
-- `docs/human-box-copy-guide.md` - guide for copying the bundle into another environment.
-- `docs/in-box-codex-guide.md` - model-facing orientation for a copied box.
-- `docs/codex-box.md` - operational notes for the Podman shim.
-- `sources.md` - primary references used while shaping the tooling.
+- Keep project accounting separate from authoritative quota state.
+- Prefer compact factual outputs over bloated advice.
+- Preserve historical prior art instead of pretending the current design appeared fully formed.
+- Optimize for workflows a human will actually reuse, not just for completeness.
 
-## Current Direction
+## Verification
 
-- The tracker is the live implementation path.
-- `efficiency-report` is the compact factual block to inject back into Codex when you want steering data.
-- The checkpoint wrapper is the preferred operator surface for everyday use.
-- The governor spike remains archived for comparison and design context.
+```bash
+python -m unittest -q \
+  test_codex_usage_tracker.py \
+  test_codex_usage_checkpoint.py \
+  test_codex_governor_spike.py
+```
