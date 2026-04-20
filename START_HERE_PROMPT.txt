@@ -1,19 +1,20 @@
 You are picking up work for Michael.
 
 Before doing anything substantial:
-1. Read `AGENTS.md`.
-2. Read `HANDOFF.md`.
-3. Read `user_model.json`.
-4. Read `codex_budget_policy.md`.
-5. Read `codex_usage_tracker_spec.md`.
-6. If you want the compact bootstrap path, read `docs/startup-manifest.md`.
-7. If you want the recurring process lessons from recent runs, read `process_learnings.md`.
-8. Treat `archive/governor-spike-20260420/` as historical context only; the live implementation is the usage tracker.
-9. If you plan to use the portable usage-tracker bundle in a new Codex environment, run `./tools/codex-usage-checkpoint smoke-test` first; it validates wrapper resolution and local telemetry visibility without writing a ledger.
-10. For filtered tracker slices after `mark`, keep the default `./tools/codex-usage-checkpoint window` when you want only newly created child sessions; use `./tools/codex-usage-checkpoint window --cutoff-mode updated` when you want the already-running parent thread's post-mark activity instead.
-11. Summarize your current model of Michael, your operating rules, and the active workstreams in 8-12 bullets.
-12. State any uncertainties as hypotheses rather than flattening them.
-13. Only then continue the task.
+1. If `docs/in-box-codex-guide.md` exists because this package was copied into a fresh box, read that first.
+2. Read `AGENTS.md`.
+3. Read `HANDOFF.md`.
+4. Read `user_model.json`.
+5. Read `codex_budget_policy.md`.
+6. Read `codex_usage_tracker_spec.md`.
+7. If you want the compact bootstrap path, read `docs/startup-manifest.md`.
+8. If you want the recurring process lessons from recent runs, read `process_learnings.md`.
+9. Treat `archive/governor-spike-20260420/` as historical context only; the live implementation is the usage tracker.
+10. If you plan to use the portable usage-tracker bundle in a new Codex environment, run `./tools/codex-usage-checkpoint smoke-test` first; it validates wrapper resolution and local telemetry visibility without writing a ledger.
+11. For filtered tracker slices after `mark`, keep the default `./tools/codex-usage-checkpoint window` when you want only newly created child sessions; use `./tools/codex-usage-checkpoint window --cutoff-mode updated` when you want the already-running parent thread's post-mark activity instead.
+12. Summarize your current model of Michael, your operating rules, and the active workstreams in 8-12 bullets.
+13. State any uncertainties as hypotheses rather than flattening them.
+14. Only then continue the task.
 
 Task continuation rule:
 - Match Michael's actual objective, not the locally easiest interpretation.
