@@ -814,6 +814,9 @@ def summarize_usage_events(
     priced_event_count = 0
     unpriced_models: set[str] = set()
     child_credit_total = 0.0
+    session_ids: set[str] = set()
+    agent_ids: set[str] = set()
+    root_event_count = 0
 
     def ensure_bucket(bucket: dict[str, dict[str, Any]], key: str) -> dict[str, Any]:
         if key not in bucket:
@@ -842,6 +845,12 @@ def summarize_usage_events(
         agent_id = _coerce_str(event.get("agent_id")) or "unknown"
         model = _coerce_str(event.get("model")) or "unknown"
         phase = _coerce_str(event.get("phase")) or "unspecified"
+        session_id = _coerce_str(event.get("session_id"))
+        if session_id:
+            session_ids.add(session_id)
+        agent_ids.add(agent_id)
+        if event.get("parent_agent_id") is None:
+            root_event_count += 1
 
         for key in ("input_tokens", "cached_input_tokens", "fresh_input_tokens", "output_tokens", "reasoning_tokens", "total_tokens"):
             token_totals[key] += _coerce_int(tokens.get(key)) or 0
@@ -889,6 +898,14 @@ def summarize_usage_events(
         "project_id": project_id,
         "event_count": len(filtered),
         "priced_event_count": priced_event_count,
+        "session_count": len(session_ids),
+        "agent_count": len(agent_ids),
+        "window": {
+            "child_only": len(filtered) > 0 and root_event_count == 0,
+            "root_event_count": root_event_count,
+            "session_count": len(session_ids),
+            "agent_count": len(agent_ids),
+        },
         "unpriced_models": sorted(unpriced_models),
         "tokens": dict(token_totals),
         "shadow_credits": dict(credit_totals),
@@ -928,6 +945,7 @@ def efficiency_report(summary: Mapping[str, Any]) -> dict[str, Any]:
     by_agent = summary.get("by_agent") if isinstance(summary.get("by_agent"), list) else []
     by_model = summary.get("by_model") if isinstance(summary.get("by_model"), list) else []
     by_phase = summary.get("by_phase") if isinstance(summary.get("by_phase"), list) else []
+    window = summary.get("window") if isinstance(summary.get("window"), dict) else {}
     top_waste = _coerce_str(summary.get("top_waste")) or "none"
 
     basis: dict[str, Any] = {}
@@ -969,6 +987,12 @@ def efficiency_report(summary: Mapping[str, Any]) -> dict[str, Any]:
 
     return {
         "top_waste": top_waste,
+        "window": {
+            "child_only": window.get("child_only"),
+            "session_count": window.get("session_count"),
+            "agent_count": window.get("agent_count"),
+            "root_event_count": window.get("root_event_count"),
+        },
         "basis": basis,
         "project_credits": (summary.get("shadow_credits") or {}).get("total") if isinstance(summary.get("shadow_credits"), dict) else None,
         "event_count": summary.get("event_count"),
@@ -1051,6 +1075,7 @@ def render_summary_text(summary: Mapping[str, Any]) -> str:
 def render_report_text(report: Mapping[str, Any]) -> str:
     shares = report.get("shares") if isinstance(report.get("shares"), dict) else {}
     basis = report.get("basis") if isinstance(report.get("basis"), dict) else {}
+    window = report.get("window") if isinstance(report.get("window"), dict) else {}
     top_agents = report.get("top_agents") if isinstance(report.get("top_agents"), list) else []
     lines = [
         f"top_waste={report.get('top_waste')}",
@@ -1062,6 +1087,14 @@ def render_report_text(report: Mapping[str, Any]) -> str:
         f" output={_coerce_float(shares.get('output')) or 0.0:.4f}"
         f" child_agents={_coerce_float(shares.get('child_agents')) or 0.0:.4f}",
     ]
+    if window:
+        lines.append(
+            "window"
+            f" child_only={window.get('child_only')}"
+            f" session_count={_coerce_int(window.get('session_count')) or 0}"
+            f" agent_count={_coerce_int(window.get('agent_count')) or 0}"
+            f" root_event_count={_coerce_int(window.get('root_event_count')) or 0}"
+        )
     if basis:
         basis_parts = " ".join(
             f"{key}={_coerce_float(value):.4f}" if _coerce_float(value) is not None else f"{key}={value}"

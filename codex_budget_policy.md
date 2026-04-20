@@ -1,33 +1,32 @@
 # codex_budget_policy.md
 
-Purpose: give Codex accurate project-scoped token information so it can improve net token efficiency without depending on the paid API or a hard throttle.
+Purpose: record the live project-scoped token-efficiency path so Codex can produce factual efficiency reports without depending on the paid API or a hard throttle.
 
 ## Core principle
-Do not reduce this problem to "tokens left" or a mode switch.
-
-The useful control loop is:
+The live control loop is:
 1. observe where this project spent tokens
 2. price those tokens with the local rate card
-3. derive a small efficiency summary
+3. emit a compact factual efficiency report
 4. feed back only the parts likely to change behavior
 
 Remaining subscription headroom and project-scoped usage accounting are separate concerns.
 
 ## Source of truth
-- Use local Codex telemetry and wrapper metadata for project accounting.
-- Treat wrapper metadata as explicit attribution fields: `project_id`, `session_id`, `agent_id`, `parent_agent_id`, `phase`, `turn_id`, `model`.
-- When available, ingest explicit per-turn usage payloads with `input_tokens`, `cached_input_tokens`, and `output_tokens`.
-- When only cumulative local telemetry exists, derive deltas and persist them as local `usage_delta` events.
-- Treat `/status`, dashboards, and similar remaining-limit surfaces as operational context, not the core project ledger.
+- Local Codex telemetry and wrapper metadata are the project ledger inputs.
+- Wrapper metadata is treated as explicit attribution fields: `project_id`, `session_id`, `agent_id`, `parent_agent_id`, `phase`, `turn_id`, `model`.
+- When available, explicit per-turn usage payloads provide `input_tokens`, `cached_input_tokens`, and `output_tokens`.
+- When only cumulative local telemetry exists, the tracker derives deltas and persists them as local `usage_delta` events.
+- `/status`, dashboards, and similar remaining-limit surfaces stay operational context rather than the core project ledger.
+- Filtered live-agent windows are the main dogfood mode for validating the report against recent real work.
 
-## What to measure
-Track these token categories separately:
+## What the report measures
+The report separates these token categories:
 - fresh input
 - cached input
 - output
 - reasoning tokens as diagnostic only
 
-Track these attribution dimensions separately:
+It also separates these attribution dimensions:
 - project
 - session
 - agent
@@ -41,7 +40,7 @@ Why this split matters:
 - reasoning tokens explain behavior but should not be charged twice
 
 ## Shadow pricing
-Use the user-provided local rate card as a shadow-price system.
+The report uses the user-provided local rate card as a shadow-price system.
 
 Default assumption:
 - the rate card denominator is per 1,000,000 tokens unless the user changes it
@@ -55,7 +54,7 @@ Charging model:
 This is for efficiency steering, not invoice replication.
 
 ## Efficiency signals
-The tracker should produce rollups for:
+The tracker produces rollups for:
 - total shadow credits by project
 - credits by agent
 - credits by model
@@ -74,7 +73,7 @@ Initial waste labels:
 These labels are heuristics. Their job is to redirect attention, not prove guilt.
 
 ## Feedback shape
-Inject a compact summary, not a giant ledger dump.
+The live feedback block is a compact summary, not a giant ledger dump.
 
 Example:
 
@@ -92,28 +91,28 @@ Example:
 }
 ```
 
-Use this to bias behavior toward:
+The report is used to bias behavior toward:
 - targeted reads over repeated broad reads
 - terse output over narrative output
 - cache-friendly continuation over restart-heavy workflows
 - delegation only when expected value beats summary and coordination cost
 
 ## What not to do
-- Do not make the system depend on paid API traffic for ordinary local work.
-- Do not inject raw telemetry streams into Codex.
-- Do not collapse project accounting into a single "remaining tokens" number.
-- Do not treat remaining-limit telemetry as if it were a project ledger.
-- Do not make the feedback block large enough to become its own cost center.
+- The system does not depend on paid API traffic for ordinary local work.
+- Raw telemetry streams are not injected into Codex.
+- Project accounting is not collapsed into a single "remaining tokens" number.
+- Remaining-limit telemetry is not treated as if it were a project ledger.
+- The feedback block is kept small enough that it does not become its own cost center.
 
 ## Good operating defaults
-- Keep `AGENTS.md` compact and push richer docs into separate files.
-- Prefer one canonical wrapper so agent attribution stays clean.
-- Persist local `usage_delta` events to JSONL so summaries are reproducible.
-- Record unpriced or low-confidence events explicitly instead of pretending they are exact.
-- Use the cheapest source that materially changes the next decision.
+- `AGENTS.md` stays compact and richer docs live elsewhere.
+- One canonical wrapper keeps agent attribution clean.
+- Local `usage_delta` events are persisted to JSONL so summaries are reproducible.
+- Unpriced or low-confidence events are recorded explicitly instead of pretending they are exact.
+- The cheapest source that materially changes the next decision is the one used.
 
 ## Bootstrap / startup reads
-- Treat "read the whole workspace and summarize it" as a measurable bootstrap cost, not the default path.
-- Prefer `docs/startup-manifest.md` for cheap orientation, then move to targeted reads.
-- If you do a large bootstrap read, record the resulting token cost in the local ledger and preserve the lesson in `process_learnings.md`.
-- Archive old control experiments before replacing them so the repo can evolve without losing the prior evidence trail.
+- "Read the whole workspace and summarize it" is a measurable bootstrap cost, not the default path.
+- `docs/startup-manifest.md` is the cheap orientation layer before targeted reads.
+- If a large bootstrap read happens, the resulting token cost is recorded in the local ledger and the lesson is preserved in `process_learnings.md`.
+- Old control experiments are archived before replacement so the repo can evolve without losing the prior evidence trail.

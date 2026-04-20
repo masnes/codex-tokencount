@@ -43,27 +43,17 @@ Use these when the space is genuinely uncertain or identity-relevant:
 This is active right now.
 Michael is exploring how to give Codex accurate project-scoped token information so it can steer toward better net token efficiency.
 
-Current best synthesis:
-- Do NOT rely on Codex to infer efficiency from vibes or from a single remaining-quota number.
-- Treat remaining-limit surfaces and project accounting as separate problems.
-- Stay on ChatGPT-backed Codex Pro by default; do not route ordinary local work through the paid API just to get usage objects.
-- Build a local ledger around wrapper metadata plus whatever Codex telemetry is available.
-- Track `project_id`, `session_id`, `agent_id`, `parent_agent_id`, `phase`, `turn_id`, and `model`.
-- Count fresh input, cached input, and output separately.
-- Use the local rate card as a shadow-price system so the tracker reflects real efficiency pressure.
-- Feed back only a compact `efficiency_hint`, not a hard throttle.
-- Prefer `gpt-5.4-mini` for exploratory or bounded work when quality loss is acceptable; escalate only when expected value justifies it.
-- Token efficiency comes mostly from context discipline, cache-friendly continuation, and avoiding expensive output, not from quota theater.
-
-Recommended implementation shape:
-- Wrapper emits local `usage_delta` events keyed by project and agent identity.
-- Tracker converts explicit usage payloads or cumulative `token_count` telemetry into those events.
-- Tracker computes per-project, per-agent, per-model, and per-phase rollups plus a small waste label.
-- Shadow credits are charged separately for fresh input, cached input, and output; reasoning tokens remain diagnostic only.
-- Child-agent usage should roll up under both the child and the parent relationship so delegation tax is visible.
-- The injected feedback block should stay tiny enough that it does not meaningfully worsen the problem it is trying to solve.
-- Remaining-limit reads such as `/status` are still useful operationally, but they are not the main design surface for the tracker.
-- The previous governor spike is archived under `archive/governor-spike-20260420/` and should be treated as prior art, not the current direction.
+Current implementation shape:
+- The live path is the local usage tracker and its `efficiency-report` output, not a hard throttle.
+- Project accounting stays separate from remaining-limit surfaces like `/status`.
+- Wrapper metadata carries `project_id`, `session_id`, `agent_id`, `parent_agent_id`, `phase`, `turn_id`, and `model`.
+- The tracker distinguishes fresh input, cached input, output, and diagnostic reasoning tokens.
+- Local shadow pricing uses the repo rate card so the report reflects actual efficiency pressure.
+- The feedback back into Codex stays compact, usually as an `efficiency_hint` or factual efficiency report.
+- `gpt-5.4-mini` is the default exploration tier when quality loss is acceptable; higher-cost work is still reserved for higher expected value.
+- Token efficiency still comes mostly from context discipline, cache-friendly continuation, and avoiding expensive output.
+- Filtered live-agent windows are the main dogfood mode: recent live threads are narrowed with `min_created_at_ms` / `min_updated_at_ms` so the report stays grounded in actual work without hauling in unrelated history.
+- The previous governor spike is archived under `archive/governor-spike-20260420/` and is treated as prior art.
 
 ### 2) Security-conscious Codex box setup
 Michael wants strong containment against container escape and accidental damage outside the handoff boundary, while keeping enough write access for productive work inside the box.

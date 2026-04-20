@@ -45,7 +45,7 @@ Interpret the probe output this way:
 - `kind=rollout_jsonl` or `kind=token_count_jsonl` means the rollout file is a likely ingest target.
 - `importable=true` is a best-effort signal from the preview or sqlite thread metadata, not proof that the preview already observed every usage record in the file.
 - `confidence=high` means the preview matched recognized usage records; lower confidence means the file is plausible but still worth validating before treating it as canonical.
-- `min_created_at_ms` and `min_updated_at_ms` are for isolating recent live threads. In filtered mode, the tracker should prefer sqlite-backed thread metadata over unrelated raw JSONL hits and still preserve `parent_agent_id` when a child thread's parent was filtered out of the main result set.
+- `min_created_at_ms` and `min_updated_at_ms` are for isolating recent live threads. Use the same cutoff in both `probe-sources` and `ingest-state-sqlite` when you want a filtered live-agent window, so the long parent thread does not drown out recent workers. In filtered mode, the tracker should prefer sqlite-backed thread metadata over unrelated raw JSONL hits and still preserve `parent_agent_id` when a child thread's parent was filtered out of the main result set.
 
 ## Event schema
 
@@ -166,6 +166,7 @@ For descriptive feedback, the tracker should support an even smaller factual rep
 ```
 
 This report is the preferred feedback path when you want the model to retain agency while still seeing the relevant evidence.
+It is also the compact factual block the model should see after dogfooding: top waste, basis, shares, top agents, top models, top phases, and any unpriced models, without the full ledger.
 
 ## CLI surface
 
@@ -200,6 +201,8 @@ The tracker should separate overhead into two buckets:
 - full summary JSON
 - efficiency hint JSON
 - efficiency report JSON
+
+Use this report to decide what the model should see: `efficiency-report` is the preferred injected payload, while `efficiency-hint` is the smaller fallback when you only need a nudge.
 
 When a tokenizer is unavailable, a cheap approximation is acceptable for prompt-token estimation. The goal is comparative guidance, not invoice precision.
 

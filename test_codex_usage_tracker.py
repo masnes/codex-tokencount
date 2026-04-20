@@ -174,6 +174,8 @@ class CodexUsageTrackerTests(unittest.TestCase):
 
         self.assertEqual(report["top_waste"], "delegation_heavy")
         self.assertGreater(report["basis"]["child_agent_share"], 0.9)
+        self.assertFalse(report["window"]["child_only"])
+        self.assertEqual(report["window"]["session_count"], 1)
         self.assertEqual(report["top_agents"][0]["agent"], "worker-1")
 
     def test_overhead_report_prefers_report_over_full_summary(self) -> None:
@@ -581,6 +583,120 @@ class CodexUsageTrackerTests(unittest.TestCase):
             self.assertEqual(events[0]["agent_id"], "worker-1")
             self.assertEqual(events[0]["parent_agent_id"], "primary")
 
+    def test_events_from_state_sqlite_filters_threads_by_updated_time_and_keeps_parent_attribution(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parent_rollout = root / "parent-rollout.jsonl"
+            child_rollout = root / "child-rollout.jsonl"
+            parent_rollout.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-20T19:00:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 1000,
+                                    "cached_input_tokens": 100,
+                                    "output_tokens": 50,
+                                    "total_tokens": 1050,
+                                }
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            child_rollout.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-20T19:01:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 300,
+                                    "cached_input_tokens": 0,
+                                    "output_tokens": 40,
+                                    "total_tokens": 340,
+                                }
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            sqlite_path = root / "state.sqlite"
+            connection = sqlite3.connect(sqlite_path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE threads (
+                        id TEXT PRIMARY KEY,
+                        rollout_path TEXT NOT NULL,
+                        cwd TEXT NOT NULL,
+                        model TEXT,
+                        agent_nickname TEXT,
+                        agent_role TEXT,
+                        tokens_used INTEGER NOT NULL DEFAULT 0,
+                        created_at_ms INTEGER,
+                        updated_at_ms INTEGER,
+                        archived INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE thread_spawn_edges (
+                        parent_thread_id TEXT NOT NULL,
+                        child_thread_id TEXT NOT NULL PRIMARY KEY,
+                        status TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO threads (id, rollout_path, cwd, model, agent_nickname, agent_role, tokens_used, created_at_ms, updated_at_ms, archived)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    ("thread-parent", str(parent_rollout), "/workspace", "gpt-5.4-mini", None, None, 1050, 1000, 2000),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO threads (id, rollout_path, cwd, model, agent_nickname, agent_role, tokens_used, created_at_ms, updated_at_ms, archived)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    ("thread-child", str(child_rollout), "/workspace", "gpt-5.4-mini", "worker-1", "editing", 340, 1500, 4000),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status)
+                    VALUES (?, ?, ?)
+                    """,
+                    ("thread-parent", "thread-child", "completed"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            events = events_from_state_sqlite(
+                sqlite_path,
+                project_id="project-a",
+                cwd_prefix="/workspace",
+                min_updated_at_ms=3000,
+            )
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["session_id"], "thread-child")
+            self.assertEqual(events[0]["agent_id"], "worker-1")
+            self.assertEqual(events[0]["parent_agent_id"], "primary")
+            self.assertEqual(events[0]["phase"], "editing")
+
     def test_probe_sources_filters_sqlite_threads_by_created_time(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -749,6 +865,27 @@ class CodexUsageTrackerTests(unittest.TestCase):
             self.assertEqual(third_result["appended"], 1)
             self.assertGreaterEqual(third_result["skipped_duplicates"], 1)
             self.assertEqual(len(load_usage_events(ledger)), 2)
+
+    def test_efficiency_report_uses_expected_basis_for_output_heavy_projects(self) -> None:
+        events = [
+            build_usage_event(
+                project_id="project-a",
+                session_id="session-a",
+                agent_id="primary",
+                model="gpt-5.4",
+                phase="review",
+                usage={"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 600},
+            ),
+        ]
+
+        report = efficiency_report(summarize_usage_events(events, project_id="project-a"))
+
+        self.assertEqual(report["top_waste"], "output_heavy")
+        self.assertEqual(report["basis"], {"output_share": report["shares"]["output"]})
+        self.assertFalse(report["window"]["child_only"])
+        self.assertEqual(report["top_agents"][0]["agent"], "primary")
+        self.assertEqual(report["top_models"][0]["model"], "gpt-5.4")
+        self.assertEqual(report["top_phases"][0]["phase"], "review")
 
 
 if __name__ == "__main__":
