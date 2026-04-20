@@ -364,6 +364,8 @@ def _load_threads_from_state_sqlite(
     path: Path,
     *,
     cwd_prefix: str | None = None,
+    min_created_at_ms: int | None = None,
+    min_updated_at_ms: int | None = None,
     max_threads: int | None = None,
 ) -> list[dict[str, Any]]:
     if not path.exists():
@@ -389,6 +391,7 @@ def _load_threads_from_state_sqlite(
         if edges_row is not None:
             for row in connection.execute("SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges"):
                 parent_map[str(row["child_thread_id"])] = str(row["parent_thread_id"])
+        agent_map = _load_thread_agent_map(connection, parent_map)
 
         query = (
             "SELECT id, rollout_path, cwd, model, agent_nickname, agent_role, tokens_used, "
@@ -400,6 +403,12 @@ def _load_threads_from_state_sqlite(
         if cwd_prefix:
             where_clauses.append("cwd LIKE ?")
             params.append(f"{cwd_prefix}%")
+        if min_created_at_ms is not None:
+            where_clauses.append("created_at_ms >= ?")
+            params.append(min_created_at_ms)
+        if min_updated_at_ms is not None:
+            where_clauses.append("updated_at_ms >= ?")
+            params.append(min_updated_at_ms)
         if where_clauses:
             query += " WHERE " + " AND ".join(where_clauses)
         query += " ORDER BY updated_at_ms DESC, id DESC"
@@ -410,7 +419,11 @@ def _load_threads_from_state_sqlite(
         threads: list[dict[str, Any]] = []
         for row in connection.execute(query, params):
             row_dict = dict(row)
-            row_dict["parent_thread_id"] = parent_map.get(str(row["id"]))
+            thread_id = str(row["id"])
+            parent_thread_id = parent_map.get(thread_id)
+            row_dict["parent_thread_id"] = parent_thread_id
+            row_dict["resolved_agent_id"] = agent_map.get(thread_id) or _thread_agent_id(row_dict)
+            row_dict["resolved_parent_agent_id"] = agent_map.get(parent_thread_id) if parent_thread_id else None
             threads.append(row_dict)
         return threads
     except sqlite3.Error:
@@ -432,12 +445,39 @@ def _thread_agent_id(thread: Mapping[str, Any]) -> str:
     return f"thread-{thread_id[:8]}"
 
 
-def _probe_rollouts_from_state_sqlite(path: Path, *, max_threads: int = 10) -> list[dict[str, Any]]:
-    threads = _load_threads_from_state_sqlite(path, max_threads=max_threads)
+def _load_thread_agent_map(connection: sqlite3.Connection, parent_map: Mapping[str, str]) -> dict[str, str]:
+    agent_map: dict[str, str] = {}
+    for row in connection.execute("SELECT id, agent_nickname, agent_role FROM threads WHERE archived = 0"):
+        thread_id = str(row["id"])
+        agent_map[thread_id] = _thread_agent_id(
+            {
+                "id": thread_id,
+                "agent_nickname": row["agent_nickname"],
+                "agent_role": row["agent_role"],
+                "parent_thread_id": parent_map.get(thread_id),
+            }
+        )
+    return agent_map
+
+
+def _probe_rollouts_from_state_sqlite(
+    path: Path,
+    *,
+    cwd_prefix: str | None = None,
+    min_created_at_ms: int | None = None,
+    min_updated_at_ms: int | None = None,
+    max_threads: int = 10,
+) -> list[dict[str, Any]]:
+    threads = _load_threads_from_state_sqlite(
+        path,
+        cwd_prefix=cwd_prefix,
+        min_created_at_ms=min_created_at_ms,
+        min_updated_at_ms=min_updated_at_ms,
+        max_threads=max_threads,
+    )
     if not threads:
         return []
 
-    agent_map = {str(thread["id"]): _thread_agent_id(thread) for thread in threads}
     results: list[dict[str, Any]] = []
     for thread in threads:
         rollout_path = _coerce_str(thread.get("rollout_path"))
@@ -453,9 +493,8 @@ def _probe_rollouts_from_state_sqlite(path: Path, *, max_threads: int = 10) -> l
             entry["importable"] = True
             entry["confidence"] = "medium"
         thread_id = _coerce_str(thread.get("id")) or "unknown"
-        agent_id = agent_map.get(thread_id) or _thread_agent_id(thread)
-        parent_thread_id = _coerce_str(thread.get("parent_thread_id"))
-        parent_agent_id = agent_map.get(parent_thread_id) if parent_thread_id else None
+        agent_id = _coerce_str(thread.get("resolved_agent_id")) or _thread_agent_id(thread)
+        parent_agent_id = _coerce_str(thread.get("resolved_parent_agent_id"))
         importability_note = str(entry.get("note") or "")
         if entry.get("kind") == "rollout_jsonl":
             importability_note = "SQLite thread metadata indicates this rollout file is importable even though the preview did not find usage records immediately."
@@ -471,6 +510,8 @@ def _probe_rollouts_from_state_sqlite(path: Path, *, max_threads: int = 10) -> l
                 "model": model,
                 "cwd": _coerce_str(thread.get("cwd")),
                 "parent_agent_id": parent_agent_id,
+                "created_at_ms": _coerce_int(thread.get("created_at_ms")),
+                "updated_at_ms": _coerce_int(thread.get("updated_at_ms")),
                 "note": note,
             }
         )
@@ -528,10 +569,14 @@ def probe_sources(
     *,
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
+    cwd_prefix: str | None = None,
+    min_created_at_ms: int | None = None,
+    min_updated_at_ms: int | None = None,
     max_results: int = 20,
 ) -> list[dict[str, Any]]:
     active_env = os.environ if env is None else env
     active_cwd = Path.cwd() if cwd is None else cwd
+    filter_by_thread_time = min_created_at_ms is not None or min_updated_at_ms is not None
 
     candidates: list[tuple[Path, str]] = []
 
@@ -564,7 +609,13 @@ def probe_sources(
         if candidate.is_file():
             described.append(_describe_source(candidate, discovered_from=discovered_from))
             if candidate.suffix == ".sqlite":
-                for rollout_entry in _probe_rollouts_from_state_sqlite(candidate, max_threads=max_results):
+                for rollout_entry in _probe_rollouts_from_state_sqlite(
+                    candidate,
+                    cwd_prefix=cwd_prefix,
+                    min_created_at_ms=min_created_at_ms,
+                    min_updated_at_ms=min_updated_at_ms,
+                    max_threads=max_results,
+                ):
                     rollout_path = Path(str(rollout_entry["path"]))
                     if rollout_path in seen_paths:
                         continue
@@ -574,10 +625,18 @@ def probe_sources(
         for file_path in _walk_candidate_files(candidate):
             if file_path in seen_paths:
                 continue
-            seen_paths.add(file_path)
-            described.append(_describe_source(file_path, discovered_from=discovered_from))
+            if not (filter_by_thread_time and file_path.suffix == ".jsonl"):
+                seen_paths.add(file_path)
+                described.append(_describe_source(file_path, discovered_from=discovered_from))
             if file_path.suffix == ".sqlite":
-                for rollout_entry in _probe_rollouts_from_state_sqlite(file_path, max_threads=max_results):
+                seen_paths.add(file_path)
+                for rollout_entry in _probe_rollouts_from_state_sqlite(
+                    file_path,
+                    cwd_prefix=cwd_prefix,
+                    min_created_at_ms=min_created_at_ms,
+                    min_updated_at_ms=min_updated_at_ms,
+                    max_threads=max_results,
+                ):
                     rollout_path = Path(str(rollout_entry["path"]))
                     if rollout_path in seen_paths:
                         continue
@@ -601,17 +660,24 @@ def events_from_state_sqlite(
     *,
     project_id: str,
     cwd_prefix: str | None = None,
+    min_created_at_ms: int | None = None,
+    min_updated_at_ms: int | None = None,
     phase: str | None = None,
     default_model: str | None = None,
     max_threads: int | None = None,
     rate_card: Mapping[str, Mapping[str, float | None]] | None = None,
     token_unit: int = RATE_CARD_TOKEN_UNIT,
 ) -> list[dict[str, Any]]:
-    threads = _load_threads_from_state_sqlite(path, cwd_prefix=cwd_prefix, max_threads=max_threads)
+    threads = _load_threads_from_state_sqlite(
+        path,
+        cwd_prefix=cwd_prefix,
+        min_created_at_ms=min_created_at_ms,
+        min_updated_at_ms=min_updated_at_ms,
+        max_threads=max_threads,
+    )
     if not threads:
         return []
 
-    agent_map = {str(thread["id"]): _thread_agent_id(thread) for thread in threads}
     events: list[dict[str, Any]] = []
     for thread in threads:
         rollout_path = _coerce_str(thread.get("rollout_path"))
@@ -622,13 +688,12 @@ def events_from_state_sqlite(
         if not rollout_file.exists():
             continue
         thread_id = _coerce_str(thread.get("id")) or "unknown-thread"
-        parent_thread_id = _coerce_str(thread.get("parent_thread_id"))
         thread_events = events_from_jsonl(
             rollout_file,
             project_id=project_id,
             session_id=thread_id,
-            agent_id=agent_map.get(thread_id) or _thread_agent_id(thread),
-            parent_agent_id=agent_map.get(parent_thread_id) if parent_thread_id else None,
+            agent_id=_coerce_str(thread.get("resolved_agent_id")) or _thread_agent_id(thread),
+            parent_agent_id=_coerce_str(thread.get("resolved_parent_agent_id")),
             model=model,
             phase=phase or _coerce_str(thread.get("agent_role")),
             turn_id_prefix=thread_id[:8],
@@ -897,7 +962,7 @@ def render_probe_text(sources: Sequence[Mapping[str, Any]]) -> str:
         )
         if source.get("thread_id"):
             lines.append(
-                f"thread_id={source.get('thread_id')} agent_id={source.get('agent_id')} parent_agent_id={source.get('parent_agent_id')} model={source.get('model')} cwd={source.get('cwd')}"
+                f"thread_id={source.get('thread_id')} agent_id={source.get('agent_id')} parent_agent_id={source.get('parent_agent_id')} model={source.get('model')} cwd={source.get('cwd')} created_at_ms={source.get('created_at_ms')} updated_at_ms={source.get('updated_at_ms')}"
             )
         note = _coerce_str(source.get("note"))
         if note:
@@ -941,6 +1006,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest_sqlite.add_argument("--sqlite", required=True)
     ingest_sqlite.add_argument("--project-id", required=True)
     ingest_sqlite.add_argument("--cwd-prefix")
+    ingest_sqlite.add_argument("--min-created-at-ms", type=int)
+    ingest_sqlite.add_argument("--min-updated-at-ms", type=int)
     ingest_sqlite.add_argument("--phase")
     ingest_sqlite.add_argument("--default-model")
     ingest_sqlite.add_argument("--max-threads", type=int)
@@ -957,6 +1024,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     probe = subparsers.add_parser("probe-sources", help="Find likely local Codex telemetry sources.")
     probe.add_argument("--cwd")
+    probe.add_argument("--cwd-prefix")
+    probe.add_argument("--min-created-at-ms", type=int)
+    probe.add_argument("--min-updated-at-ms", type=int)
     probe.add_argument("--max-results", type=int, default=20)
     probe.add_argument("--format", choices=("text", "json"), default="text")
 
@@ -1022,6 +1092,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             sqlite_path,
             project_id=args.project_id,
             cwd_prefix=args.cwd_prefix,
+            min_created_at_ms=args.min_created_at_ms,
+            min_updated_at_ms=args.min_updated_at_ms,
             phase=args.phase,
             default_model=args.default_model,
             max_threads=args.max_threads,
@@ -1054,7 +1126,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "probe-sources":
         cwd = Path(args.cwd) if args.cwd else Path.cwd()
-        sources = probe_sources(cwd=cwd, max_results=args.max_results)
+        sources = probe_sources(
+            cwd=cwd,
+            cwd_prefix=args.cwd_prefix,
+            min_created_at_ms=args.min_created_at_ms,
+            min_updated_at_ms=args.min_updated_at_ms,
+            max_results=args.max_results,
+        )
         if args.format == "json":
             print(json.dumps(sources, indent=2, sort_keys=True))
         else:

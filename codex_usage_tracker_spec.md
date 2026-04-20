@@ -36,6 +36,17 @@ It is not a hard throttle or a replica of OpenAI billing.
 - per-file attribution without separate source-block counting
 - unpriced models such as research-preview variants
 
+## Source discovery and probe interpretation
+
+`probe-sources` should be treated as a discovery pass, not a billing verdict. It scans the current environment and a small set of known local roots, including `CODEX_ROLLOUT_FILE`, `CODEX_OUT`, `CODEX_HOME`, `./_codex_out`, `/workspace/_codex_out`, `~/.codex`, and `/codex-home`.
+
+Interpret the probe output this way:
+- `kind=sqlite_state` with `importable=false` means the tracker found a Codex state database, but the database itself is only a discovery root.
+- `kind=rollout_jsonl` or `kind=token_count_jsonl` means the rollout file is a likely ingest target.
+- `importable=true` is a best-effort signal from the preview or sqlite thread metadata, not proof that the preview already observed every usage record in the file.
+- `confidence=high` means the preview matched recognized usage records; lower confidence means the file is plausible but still worth validating before treating it as canonical.
+- `min_created_at_ms` and `min_updated_at_ms` are for isolating recent live threads. In filtered mode, the tracker should prefer sqlite-backed thread metadata over unrelated raw JSONL hits and still preserve `parent_agent_id` when a child thread's parent was filtered out of the main result set.
+
 ## Event schema
 
 ```json
@@ -143,6 +154,11 @@ Repeated import commands should report:
 - source event count
 - appended count
 - skipped duplicate count
+- duplicate suppression must be safe to repeat because event identity is derived from a deterministic `event_id` over the event's identity payload
+
+Important state-sqlite filters:
+- `probe-sources --min-created-at-ms ...` or `--min-updated-at-ms ...`
+- `ingest-state-sqlite --min-created-at-ms ...` or `--min-updated-at-ms ...`
 
 ## Archive boundary
 
