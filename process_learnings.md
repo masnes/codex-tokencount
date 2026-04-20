@@ -13,6 +13,10 @@
 - Scoped window ledgers are derived state, not canonical state. Rebuild them on each run or stale slices will leak forward and make fixes look ineffective.
 - The dominant overhead is usually not reading local token counts; it is making the model read a bloated accounting block. Optimize the injected output first.
 - When the model is strong, factual efficiency reports beat prescriptive advice. Keep the evidence, drop the marching orders.
+- `window --cutoff-mode updated` is the practical mode for bounded same-thread work. It can now be good enough to steer "stay local vs spawn helpers" during the pass, not just after it.
+- `window` is cumulative since the last `mark`. That is correct, but users misread it as step-local unless the docs and help say so explicitly.
+- Cold users should stay on the checkpoint wrapper. A `probe` subcommand that mirrors `mark` / `window` / `smoke-test` reduces muscle-memory failures compared with dropping to raw `probe-sources`.
+- Full-project snapshots are still coarse accounting because the long-lived primary thread dominates them. Decision-useful steering lives in filtered windows, especially `updated` for same-thread passes and `created` for fresh child batches.
 
 ## 2026-04-15
 

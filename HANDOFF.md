@@ -54,8 +54,17 @@ Current implementation shape:
 - Token efficiency still comes mostly from context discipline, cache-friendly continuation, and avoiding expensive output.
 - Filtered live-agent windows are the main dogfood mode: recent live threads are narrowed with `min_created_at_ms` / `min_updated_at_ms` so the report stays grounded in actual work without hauling in unrelated history.
 - For a copied or flattened portable tracker bundle, `./tools/codex-usage-checkpoint smoke-test` is the first check: it validates wrapper resolution and probes local telemetry without writing a ledger.
+- For cold users and copied boxes, prefer `./tools/codex-usage-checkpoint probe` over raw `probe-sources`; it keeps the same flag surface as `mark`, `window`, and `smoke-test`.
 - In the checkpoint wrapper, the default `window` cutoff is `created` and is best for newly spawned child sessions after `mark`; use `./tools/codex-usage-checkpoint window --cutoff-mode updated` when you want the already-running parent thread's post-mark activity instead.
+- Re-running `window` with the same cutoff is cumulative since that `mark`, not a fresh step-local slice. If you want a new baseline, `mark` again first.
+- External dogfood has now crossed the threshold from "qualitative guardrail" to "useful live steering" for bounded same-thread work: updated windows were small enough to support keep-local-vs-spawn decisions during real passes.
+- Full-project `snapshot` remains more useful for coarse accounting than for local steering because the long-lived primary thread dominates it.
 - The previous governor spike is archived under `archive/governor-spike-20260420/` and is treated as prior art.
+
+Recent tracker verification worth trusting:
+- `python -m unittest /workspace/test_codex_usage_tracker.py /workspace/test_codex_usage_checkpoint.py` passed with 31 tests at closeout.
+- `./tools/codex-usage-checkpoint smoke-test --project-id workspace --cwd-prefix /workspace --format json` worked against live local telemetry.
+- `./tools/codex-usage-checkpoint probe --project-id workspace --cwd-prefix /workspace --format json` worked and is the preferred discovery entrypoint for first contact.
 
 ### 2) Security-conscious Codex box setup
 Michael wants strong containment against container escape and accidental damage outside the handoff boundary, while keeping enough write access for productive work inside the box.
