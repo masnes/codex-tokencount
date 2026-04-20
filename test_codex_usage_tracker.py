@@ -15,6 +15,8 @@ from codex_usage_tracker import (
     load_usage_events,
     overhead_report,
     probe_sources,
+    render_report_text,
+    render_summary_text,
     shadow_credits_for_usage,
     summarize_usage_events,
 )
@@ -318,6 +320,66 @@ class CodexUsageTrackerTests(unittest.TestCase):
         self.assertEqual(report["top_agents"][0]["agent"], "worker-1")
         self.assertEqual(report["top_models"][0]["pricing"]["input_rate"], 62.5)
         self.assertEqual(report["top_models"][0]["pricing"]["output_rate"], 375.0)
+
+    def test_summary_text_includes_model_token_and_rate_breakdown(self) -> None:
+        events = [
+            build_usage_event(
+                project_id="project-a",
+                session_id="session-a",
+                agent_id="primary",
+                model="gpt-5.4",
+                usage={"input_tokens": 1000, "cached_input_tokens": 100, "output_tokens": 50},
+            ),
+            build_usage_event(
+                project_id="project-a",
+                session_id="session-a",
+                agent_id="worker-1",
+                parent_agent_id="primary",
+                model="gpt-5.4-mini",
+                usage={"input_tokens": 500, "cached_input_tokens": 50, "output_tokens": 80},
+            ),
+        ]
+
+        text = render_summary_text(summarize_usage_events(events, project_id="project-a"))
+
+        self.assertIn("top_model_1 key=gpt-5.4", text)
+        self.assertIn("fresh_input_tokens=900", text)
+        self.assertIn("cached_input_tokens=100", text)
+        self.assertIn("output_tokens=50", text)
+        self.assertIn("input_rate=62.5", text)
+        self.assertIn("cached_input_rate=6.25", text)
+        self.assertIn("output_rate=375.0", text)
+
+    def test_report_text_includes_model_token_and_rate_breakdown(self) -> None:
+        events = [
+            build_usage_event(
+                project_id="project-a",
+                session_id="session-a",
+                agent_id="primary",
+                model="gpt-5.4",
+                usage={"input_tokens": 1000, "cached_input_tokens": 100, "output_tokens": 50},
+            ),
+            build_usage_event(
+                project_id="project-a",
+                session_id="session-a",
+                agent_id="worker-1",
+                parent_agent_id="primary",
+                model="gpt-5.4-mini",
+                usage={"input_tokens": 500, "cached_input_tokens": 50, "output_tokens": 80},
+            ),
+        ]
+
+        report = efficiency_report(summarize_usage_events(events, project_id="project-a"))
+        text = render_report_text(report)
+
+        self.assertIn("top_model_1 key=gpt-5.4", text)
+        self.assertIn("events=1", text)
+        self.assertIn("fresh_input_tokens=900", text)
+        self.assertIn("cached_input_tokens=100", text)
+        self.assertIn("output_tokens=50", text)
+        self.assertIn("input_rate=62.5", text)
+        self.assertIn("cached_input_rate=6.25", text)
+        self.assertIn("output_rate=375.0", text)
 
     def test_overhead_report_prefers_report_over_full_summary(self) -> None:
         events = [

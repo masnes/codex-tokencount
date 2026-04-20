@@ -177,6 +177,8 @@ For descriptive feedback, the tracker should support an even smaller factual rep
 This report is the preferred feedback path when you want the model to retain agency while still seeing the relevant evidence.
 It is also the compact factual block the model should see after dogfooding: top waste, basis, shares, top agents, top models, top phases, and any unpriced models, without the full ledger.
 
+The human-readable `summary` and `efficiency-report --format text` paths should still expose the main economic story. They should include a compact per-model breakdown with events, fresh-input tokens, cached-input tokens, output tokens, applied rates, and credits.
+
 ## CLI surface
 
 Current canonical entrypoints:

@@ -1043,7 +1043,11 @@ def efficiency_report(summary: Mapping[str, Any]) -> dict[str, Any]:
     top_models = [
         {
             "model": item.get("key"),
+            "events": item.get("count"),
             "credits": (item.get("shadow_credits") or {}).get("total"),
+            "fresh_input_tokens": (item.get("tokens") or {}).get("fresh_input_tokens"),
+            "cached_input_tokens": (item.get("tokens") or {}).get("cached_input_tokens"),
+            "output_tokens": (item.get("tokens") or {}).get("output_tokens"),
             "pricing": item.get("pricing"),
         }
         for item in by_model[:2]
@@ -1131,12 +1135,29 @@ def render_summary_text(summary: Mapping[str, Any]) -> str:
         f"top_waste={summary.get('top_waste')}",
     ]
     by_agent = summary.get("by_agent") if isinstance(summary.get("by_agent"), list) else []
+    by_model = summary.get("by_model") if isinstance(summary.get("by_model"), list) else []
     if by_agent:
         leader = by_agent[0]
         lines.append(
             "top_agent"
             f" key={leader.get('key')}"
             f" credits={_coerce_float((leader.get('shadow_credits') or {}).get('total')) or 0.0:.4f}"
+        )
+    for index, item in enumerate(by_model[:3], start=1):
+        tokens = item.get("tokens") if isinstance(item.get("tokens"), dict) else {}
+        pricing = item.get("pricing") if isinstance(item.get("pricing"), dict) else {}
+        lines.append(
+            f"top_model_{index}"
+            f" key={item.get('key')}"
+            f" events={_coerce_int(item.get('count')) or 0}"
+            f" credits={_coerce_float((item.get('shadow_credits') or {}).get('total')) or 0.0:.4f}"
+            f" fresh_input_tokens={_coerce_int(tokens.get('fresh_input_tokens')) or 0}"
+            f" cached_input_tokens={_coerce_int(tokens.get('cached_input_tokens')) or 0}"
+            f" output_tokens={_coerce_int(tokens.get('output_tokens')) or 0}"
+            f" input_rate={pricing.get('input_rate')}"
+            f" cached_input_rate={pricing.get('cached_input_rate')}"
+            f" output_rate={pricing.get('output_rate')}"
+            f" pricing_state={pricing.get('pricing_state')}"
         )
     if summary.get("unpriced_models"):
         lines.append(f"unpriced_models={','.join(str(item) for item in summary['unpriced_models'])}")
@@ -1148,6 +1169,7 @@ def render_report_text(report: Mapping[str, Any]) -> str:
     basis = report.get("basis") if isinstance(report.get("basis"), dict) else {}
     window = report.get("window") if isinstance(report.get("window"), dict) else {}
     top_agents = report.get("top_agents") if isinstance(report.get("top_agents"), list) else []
+    top_models = report.get("top_models") if isinstance(report.get("top_models"), list) else []
     lines = [
         f"top_waste={report.get('top_waste')}",
         f"project_credits={_coerce_float(report.get('project_credits')) or 0.0:.4f}",
@@ -1179,6 +1201,21 @@ def render_report_text(report: Mapping[str, Any]) -> str:
             f" credits={_coerce_float(item.get('credits')) or 0.0:.4f}"
             f" input_tokens={_coerce_int(item.get('input_tokens')) or 0}"
             f" output_tokens={_coerce_int(item.get('output_tokens')) or 0}"
+        )
+    for index, item in enumerate(top_models[:2], start=1):
+        pricing = item.get("pricing") if isinstance(item.get("pricing"), dict) else {}
+        lines.append(
+            f"top_model_{index}"
+            f" key={item.get('model')}"
+            f" events={_coerce_int(item.get('events')) or 0}"
+            f" credits={_coerce_float(item.get('credits')) or 0.0:.4f}"
+            f" fresh_input_tokens={_coerce_int(item.get('fresh_input_tokens')) or 0}"
+            f" cached_input_tokens={_coerce_int(item.get('cached_input_tokens')) or 0}"
+            f" output_tokens={_coerce_int(item.get('output_tokens')) or 0}"
+            f" input_rate={pricing.get('input_rate')}"
+            f" cached_input_rate={pricing.get('cached_input_rate')}"
+            f" output_rate={pricing.get('output_rate')}"
+            f" pricing_state={pricing.get('pricing_state')}"
         )
     return "\n".join(lines)
 
