@@ -3,5 +3,25 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
+python_bin="${PYTHON:-python}"
+tracker_path="${CODEX_USAGE_TRACKER:-}"
 
-exec python "$repo_root/codex_usage_tracker.py" "$@"
+if [[ -z "$tracker_path" ]]; then
+  for candidate in \
+    "$script_dir/codex_usage_tracker.py" \
+    "$repo_root/codex_usage_tracker.py"
+  do
+    if [[ -f "$candidate" ]]; then
+      tracker_path="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ -z "$tracker_path" ]]; then
+  echo "could not locate codex_usage_tracker.py relative to $0" >&2
+  echo "set CODEX_USAGE_TRACKER to the tracker path if the bundle was copied into a different layout" >&2
+  exit 1
+fi
+
+exec "$python_bin" "$tracker_path" "$@"

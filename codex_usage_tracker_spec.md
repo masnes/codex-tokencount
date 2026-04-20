@@ -180,7 +180,7 @@ Current canonical entrypoints:
 - `python codex_usage_tracker.py overhead-report ...`
 - `python codex_usage_tracker.py probe-sources ...`
 - `./tools/codex-usage ...`
-- `./tools/codex-usage-checkpoint [snapshot|window|mark] ...`
+- `./tools/codex-usage-checkpoint [snapshot|window|mark|smoke-test] ...`
 
 Repeated import commands should report:
 - source event count
@@ -197,6 +197,11 @@ Convenience wrapper:
 - `codex-usage-checkpoint mark` should save a millisecond cutoff for later use.
 - `codex-usage-checkpoint window` should reuse that cutoff, keep the main project ledger current, and emit its report from a separate scoped ledger for that cutoff.
 - `codex-usage-checkpoint window --cutoff-mode updated` should support slicing the current thread after a mark; the default `created` mode is for newly spawned child sessions.
+- `codex-usage-checkpoint smoke-test` should validate wrapper resolution and optionally run a cheap `probe-sources` check without writing a ledger.
+
+Wrapper portability:
+- `tools/codex-usage` should resolve `codex_usage_tracker.py` from either a repo-root `tools/` layout or a flat copied layout where the wrapper and tracker live side by side.
+- `tools/codex-usage-checkpoint` should resolve `codex-usage` from either that repo-root `tools/` layout or a flat copied layout.
 
 ## Overhead model
 

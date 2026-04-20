@@ -14,8 +14,8 @@ What this package contains:
 - `process_learnings.md` — rolling notes on process lessons from recent runs.
 - `docs/startup-manifest.md` — compact first-read manifest for bootstrap runs.
 - `docs/codex-box.md` — separate operational note for the Podman shim.
-- `tools/codex-usage` — thin wrapper around `codex_usage_tracker.py`.
-- `tools/codex-usage-checkpoint` — one-command wrapper for `mark`, `snapshot`, and filtered `window` tracker flows.
+- `tools/codex-usage` — thin wrapper around `codex_usage_tracker.py`, resilient to either a repo-root `tools/` layout or a flat copied bundle.
+- `tools/codex-usage-checkpoint` — one-command wrapper for `mark`, `snapshot`, filtered `window` tracker flows, and `smoke-test`.
 - `tools/codex-box` — the shim itself, kept out of the repo root on purpose.
 - `archive/governor-spike-20260420/` — the preserved pre-rewrite quota-governor spike.
 - `sources.md` — official docs and references used to shape the package.
@@ -36,8 +36,9 @@ Suggested startup pattern:
 4. If you are instrumenting a project, start with `./tools/codex-usage probe-sources` to discover likely local telemetry roots, then use `ingest-jsonl` or `ingest-state-sqlite` and keep a local JSONL ledger per project. Repeated ingests are deduplicated by deterministic event IDs, so rerunning the same import is safe. When you want to isolate newly launched workers instead of a long parent thread, use `--min-created-at-ms` or `--min-updated-at-ms`.
 5. If you want to feed the tracker back into Codex, inject `./tools/codex-usage efficiency-report` instead of a full summary. That is the compact factual view the model should see. Use `./tools/codex-usage overhead-report` first to compare the prompt cost of `summary`, `efficiency-hint`, and `efficiency-report`.
 6. If you want the whole tracker loop as one command, use `./tools/codex-usage-checkpoint snapshot` for a repo-wide checkpoint, `./tools/codex-usage-checkpoint mark` before launching agents, and `./tools/codex-usage-checkpoint window` after the agent batch. `window` keeps the main project ledger fresh but emits its report from a separate scoped ledger for that cutoff, so the output stays focused on the recent slice. Use `--cutoff-mode updated` when you want to isolate the current thread after the mark instead of only newly created child sessions.
-7. For manual onboarding, paste `START_HERE_PROMPT.txt`.
-8. Let Codex summarize its understanding before it starts changing things.
+7. If you copy the wrappers into another Codex environment, run `./tools/codex-usage-checkpoint smoke-test` first. That validates wrapper resolution and local telemetry discovery without writing a ledger.
+8. For manual onboarding, paste `START_HERE_PROMPT.txt`.
+9. Let Codex summarize its understanding before it starts changing things.
 
 Design philosophy:
 - Small durable guidance in `AGENTS.md`.

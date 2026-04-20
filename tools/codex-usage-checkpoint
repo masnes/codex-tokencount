@@ -3,12 +3,30 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
-usage_tool="${CODEX_USAGE_TOOL:-$repo_root/tools/codex-usage}"
+usage_tool="${CODEX_USAGE_TOOL:-}"
+
+if [[ -z "$usage_tool" ]]; then
+  for candidate in \
+    "$script_dir/codex-usage" \
+    "$repo_root/tools/codex-usage"
+  do
+    if [[ -x "$candidate" ]]; then
+      usage_tool="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ -z "$usage_tool" ]]; then
+  echo "could not locate codex-usage relative to $0" >&2
+  echo "set CODEX_USAGE_TOOL to the wrapper path if the bundle was copied into a different layout" >&2
+  exit 1
+fi
 
 command="snapshot"
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    mark|snapshot|window)
+    mark|smoke-test|snapshot|window)
       command="$1"
       shift
       ;;
@@ -36,12 +54,13 @@ scoped_ledger=""
 usage() {
   cat <<'EOF'
 Usage:
-  codex-usage-checkpoint [snapshot|window|mark] [options]
+  codex-usage-checkpoint [snapshot|window|mark|smoke-test] [options]
 
 Commands:
   snapshot   Ingest current repo-scoped usage and emit a compact report. Default.
   window     Use a saved or explicit cutoff to isolate a recent live-agent window.
   mark       Record the current millisecond timestamp for a later `window` run.
+  smoke-test Validate wrapper resolution and probe local telemetry without writing a ledger.
 
 Options:
   --project-id ID         Project id stored in the ledger.
@@ -58,6 +77,7 @@ Options:
 Examples:
   ./tools/codex-usage-checkpoint mark
   ./tools/codex-usage-checkpoint window
+  ./tools/codex-usage-checkpoint smoke-test
   ./tools/codex-usage-checkpoint snapshot --format text
 EOF
 }
@@ -120,6 +140,8 @@ case "$cutoff_mode" in
     ;;
 esac
 
+report_ledger="$ledger"
+
 case "$output_format" in
   json|text) ;;
   *)
@@ -145,6 +167,47 @@ print(json.dumps({
 PY
   else
     printf 'command=mark project_id=%s cutoff_file=%s cutoff_ms=%s\n' "$project_id" "$cutoff_file" "$now_ms"
+  fi
+  exit 0
+fi
+
+if [[ "$command" == "smoke-test" ]]; then
+  "$usage_tool" --help >/dev/null
+  probe_status="not_run"
+  probe_json="null"
+  if [[ -f "$sqlite_path" ]]; then
+    probe_json="$("$usage_tool" probe-sources --cwd-prefix "$cwd_prefix" --max-results 5 --format json)"
+    probe_status="ok"
+  fi
+  if [[ "$output_format" == "json" ]]; then
+    python - <<'PY' "$usage_tool" "$sqlite_path" "$cwd_prefix" "$probe_status" "$probe_json"
+import json, os, sys
+
+usage_tool, sqlite_path, cwd_prefix, probe_status, probe_json = sys.argv[1:]
+result = {
+    "command": "smoke-test",
+    "usage_tool": usage_tool,
+    "sqlite": sqlite_path,
+    "sqlite_exists": os.path.isfile(sqlite_path),
+    "cwd_prefix": cwd_prefix,
+    "tracker_cli_ok": True,
+    "probe_status": probe_status,
+}
+if probe_json != "null":
+    sources = json.loads(probe_json)
+    result["probe"] = {
+        "source_count": len(sources),
+        "importable_count": sum(1 for item in sources if item.get("importable")),
+        "sources": sources,
+    }
+print(json.dumps(result, indent=2, sort_keys=True))
+PY
+  else
+    printf 'command=smoke-test usage_tool=%s sqlite=%s sqlite_exists=%s cwd_prefix=%s tracker_cli_ok=true probe_status=%s\n' \
+      "$usage_tool" "$sqlite_path" "$([[ -f "$sqlite_path" ]] && printf true || printf false)" "$cwd_prefix" "$probe_status"
+    if [[ "$probe_json" != "null" ]]; then
+      printf '\n[probe]\n%s\n' "$probe_json"
+    fi
   fi
   exit 0
 fi
