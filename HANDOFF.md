@@ -53,6 +53,8 @@ Current implementation shape:
 - `gpt-5.4-mini` is the default exploration tier when quality loss is acceptable; higher-cost work is still reserved for higher expected value.
 - Token efficiency still comes mostly from context discipline, cache-friendly continuation, and avoiding expensive output.
 - Filtered live-agent windows are the main dogfood mode: recent live threads are narrowed with `min_created_at_ms` / `min_updated_at_ms` so the report stays grounded in actual work without hauling in unrelated history.
+- For a copied or flattened portable tracker bundle, `./tools/codex-usage-checkpoint smoke-test` is the first check: it validates wrapper resolution and probes local telemetry without writing a ledger.
+- In the checkpoint wrapper, the default `window` cutoff is `created` and is best for newly spawned child sessions after `mark`; use `./tools/codex-usage-checkpoint window --cutoff-mode updated` when you want the already-running parent thread's post-mark activity instead.
 - The previous governor spike is archived under `archive/governor-spike-20260420/` and is treated as prior art.
 
 ### 2) Security-conscious Codex box setup

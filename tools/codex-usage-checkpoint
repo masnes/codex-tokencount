@@ -243,6 +243,7 @@ if [[ "$command" == "window" ]]; then
   ledger_stem="${ledger_base%.jsonl}"
   scoped_ledger="$ledger_dir/${ledger_stem}-window-${cutoff_mode}-${cutoff_ms}.jsonl"
   report_ledger="$scoped_ledger"
+  : > "$report_ledger"
   project_ingest_json="$("$usage_tool" "${common_ingest_args[@]}" --ledger "$ledger")"
 fi
 

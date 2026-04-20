@@ -9,6 +9,8 @@
 - Keep live feedback tiny. A large observability payload can easily become its own inefficiency tax.
 - Dogfood the ledger under repeated imports before trusting it. A tracker that doubles history on the second ingest is worse than no tracker because it looks precise while lying.
 - Dogfood with live child agents, not just the primary thread. That is how you discover whether parent-child attribution survives real filters like "only threads created after this moment."
+- A thread-level `updated_at` filter is not enough for a useful "current task cell." If you ingest the whole rollout for any updated thread, the long-lived primary thread will swamp the slice; clip emitted events by rollout timestamps and compute deltas from the last cumulative record before the cutoff.
+- Scoped window ledgers are derived state, not canonical state. Rebuild them on each run or stale slices will leak forward and make fixes look ineffective.
 - The dominant overhead is usually not reading local token counts; it is making the model read a bloated accounting block. Optimize the injected output first.
 - When the model is strong, factual efficiency reports beat prescriptive advice. Keep the evidence, drop the marching orders.
 

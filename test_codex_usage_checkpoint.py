@@ -189,6 +189,78 @@ class CodexUsageCheckpointTests(unittest.TestCase):
             self.assertEqual(calls[3]["args"][0], "overhead-report")
             self.assertEqual(calls[3]["args"][calls[3]["args"].index("--ledger") + 1], expected_report_ledger)
 
+    def test_window_updated_mode_uses_explicit_cutoff_without_cutoff_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            project_root = root / "repo"
+            project_root.mkdir()
+            ledger = root / "workspace-ledger.jsonl"
+            cutoff_file = root / "workspace-cutoff-ms"
+            cutoff_ms = "1700000000123"
+            sqlite_path = root / "state_5.sqlite"
+            sqlite_path.write_text("", encoding="utf-8")
+            log_path = root / "usage-tool-log.jsonl"
+            fake_tool = root / "fake-codex-usage"
+            self._write_fake_usage_tool(fake_tool, log_path)
+
+            env = os.environ.copy()
+            env["CODEX_USAGE_TOOL"] = str(fake_tool)
+            env["FAKE_USAGE_LOG"] = str(log_path)
+
+            window = subprocess.run(
+                [
+                    "/workspace/tools/codex-usage-checkpoint",
+                    "window",
+                    "--project-id",
+                    "workspace",
+                    "--ledger",
+                    str(ledger),
+                    "--sqlite",
+                    str(sqlite_path),
+                    "--cwd-prefix",
+                    str(project_root),
+                    "--cutoff-file",
+                    str(cutoff_file),
+                    "--cutoff-ms",
+                    cutoff_ms,
+                    "--cutoff-mode",
+                    "updated",
+                ],
+                cwd=project_root,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            payload = json.loads(window.stdout)
+
+            expected_report_ledger = str(root / f"workspace-ledger-window-updated-{cutoff_ms}.jsonl")
+
+            self.assertFalse(cutoff_file.exists())
+            self.assertEqual(payload["filter"], {"mode": "updated", "cutoff_ms": int(cutoff_ms)})
+            self.assertEqual(payload["ledger"], str(ledger))
+            self.assertEqual(payload["report_ledger"], expected_report_ledger)
+            self.assertEqual(payload["ingest"]["ledger"], expected_report_ledger)
+            self.assertEqual(payload["project_ingest"]["ledger"], str(ledger))
+            self.assertEqual(payload["report"]["debug_ledger"], expected_report_ledger)
+
+            calls = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(calls), 4)
+            self.assertEqual(calls[0]["args"][0], "ingest-state-sqlite")
+            self.assertEqual(calls[0]["args"][calls[0]["args"].index("--ledger") + 1], str(ledger))
+            self.assertIn("--min-updated-at-ms", calls[0]["args"])
+            self.assertEqual(calls[0]["args"][calls[0]["args"].index("--min-updated-at-ms") + 1], cutoff_ms)
+            self.assertNotIn("--min-created-at-ms", calls[0]["args"])
+            self.assertEqual(calls[1]["args"][0], "ingest-state-sqlite")
+            self.assertEqual(calls[1]["args"][calls[1]["args"].index("--ledger") + 1], expected_report_ledger)
+            self.assertIn("--min-updated-at-ms", calls[1]["args"])
+            self.assertEqual(calls[1]["args"][calls[1]["args"].index("--min-updated-at-ms") + 1], cutoff_ms)
+            self.assertNotIn("--min-created-at-ms", calls[1]["args"])
+            self.assertEqual(calls[2]["args"][0], "efficiency-report")
+            self.assertEqual(calls[2]["args"][calls[2]["args"].index("--ledger") + 1], expected_report_ledger)
+            self.assertEqual(calls[3]["args"][0], "overhead-report")
+            self.assertEqual(calls[3]["args"][calls[3]["args"].index("--ledger") + 1], expected_report_ledger)
+
     def test_snapshot_respects_explicit_ledger_path(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

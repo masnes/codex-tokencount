@@ -74,6 +74,22 @@ def _coerce_float(value: Any) -> float | None:
     return None
 
 
+def _coerce_timestamp_ms(value: Any) -> int | None:
+    text = _coerce_str(value)
+    if text is None:
+        return None
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return int(parsed.timestamp() * 1000)
+
+
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     documents: list[dict[str, Any]] = []
     if not path.exists():
@@ -680,6 +696,9 @@ def events_from_state_sqlite(
         return []
 
     events: list[dict[str, Any]] = []
+    event_cutoff_ms = max(
+        value for value in (min_created_at_ms, min_updated_at_ms) if value is not None
+    ) if min_created_at_ms is not None or min_updated_at_ms is not None else None
     for thread in threads:
         rollout_path = _coerce_str(thread.get("rollout_path"))
         model = _coerce_str(thread.get("model")) or default_model
@@ -698,6 +717,7 @@ def events_from_state_sqlite(
             model=model,
             phase=phase or _coerce_str(thread.get("agent_role")),
             turn_id_prefix=thread_id[:8],
+            min_captured_at_ms=event_cutoff_ms,
             rate_card=rate_card,
             token_unit=token_unit,
         )
@@ -715,6 +735,7 @@ def events_from_jsonl(
     parent_agent_id: str | None = None,
     phase: str | None = None,
     turn_id_prefix: str | None = None,
+    min_captured_at_ms: int | None = None,
     rate_card: Mapping[str, Mapping[str, float | None]] | None = None,
     token_unit: int = RATE_CARD_TOKEN_UNIT,
 ) -> list[dict[str, Any]]:
@@ -727,11 +748,17 @@ def events_from_jsonl(
         extracted = _extract_usage_payload(record)
         if extracted is None:
             continue
+        captured_at_ms = _coerce_timestamp_ms(extracted["captured_at"])
         if extracted["mode"] == "cumulative":
             usage = _usage_delta_from_cumulative(extracted["payload"], previous_cumulative)
             previous_cumulative = extracted["payload"]
         else:
             usage = normalize_token_usage(extracted["payload"])
+
+        if min_captured_at_ms is not None and (
+            captured_at_ms is None or captured_at_ms < min_captured_at_ms
+        ):
+            continue
 
         if usage["total_tokens"] <= 0:
             continue

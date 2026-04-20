@@ -45,7 +45,7 @@ Interpret the probe output this way:
 - `kind=rollout_jsonl` or `kind=token_count_jsonl` means the rollout file is a likely ingest target.
 - `importable=true` is a best-effort signal from the preview or sqlite thread metadata, not proof that the preview already observed every usage record in the file.
 - `confidence=high` means the preview matched recognized usage records; lower confidence means the file is plausible but still worth validating before treating it as canonical.
-- `min_created_at_ms` and `min_updated_at_ms` are for isolating recent live threads. Use the same cutoff in both `probe-sources` and `ingest-state-sqlite` when you want a filtered live-agent window, so the long parent thread does not drown out recent workers. In filtered mode, the tracker should prefer sqlite-backed thread metadata over unrelated raw JSONL hits and still preserve `parent_agent_id` when a child thread's parent was filtered out of the main result set.
+- `min_created_at_ms` and `min_updated_at_ms` are for isolating recent live threads. Use the same cutoff in both `probe-sources` and `ingest-state-sqlite` when you want a filtered live-agent window, so the long parent thread does not drown out recent workers. In filtered mode, the tracker should prefer sqlite-backed thread metadata over unrelated raw JSONL hits, preserve `parent_agent_id` when a child thread's parent was filtered out of the main result set, and clip emitted usage events by rollout timestamps so `updated` windows represent post-cutoff activity rather than full thread history.
 
 ## Event schema
 
@@ -195,8 +195,8 @@ Important state-sqlite filters:
 Convenience wrapper:
 - `codex-usage-checkpoint snapshot` should ingest the current repo-scoped window and emit a combined report.
 - `codex-usage-checkpoint mark` should save a millisecond cutoff for later use.
-- `codex-usage-checkpoint window` should reuse that cutoff, keep the main project ledger current, and emit its report from a separate scoped ledger for that cutoff.
-- `codex-usage-checkpoint window --cutoff-mode updated` should support slicing the current thread after a mark; the default `created` mode is for newly spawned child sessions.
+- `codex-usage-checkpoint window` should reuse that cutoff, keep the main project ledger current, and emit its report from a separate scoped ledger for that cutoff. That scoped ledger is derived state and should be rebuilt on each run.
+- `codex-usage-checkpoint window --cutoff-mode updated` should support slicing post-cutoff activity from the current thread after a mark; the default `created` mode is for newly spawned child sessions.
 - `codex-usage-checkpoint smoke-test` should validate wrapper resolution and optionally run a cheap `probe-sources` check without writing a ledger.
 
 Wrapper portability:

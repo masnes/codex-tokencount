@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -20,6 +21,10 @@ from codex_usage_tracker import (
 
 
 class CodexUsageTrackerTests(unittest.TestCase):
+    @staticmethod
+    def _ts_ms(value: str) -> int:
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp() * 1000)
+
     def test_shadow_credits_charge_fresh_and_cached_input_separately(self) -> None:
         credits = shadow_credits_for_usage(
             "gpt-5.4-mini",
@@ -98,6 +103,87 @@ class CodexUsageTrackerTests(unittest.TestCase):
             self.assertEqual(events[1]["tokens"]["cached_input_tokens"], 20)
             self.assertEqual(events[1]["tokens"]["output_tokens"], 40)
             self.assertEqual(events[1]["tokens"]["reasoning_tokens"], 15)
+
+    def test_events_from_jsonl_clips_cumulative_usage_to_post_cutoff_deltas(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "rollout.jsonl"
+            source.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": "2026-04-20T19:00:00Z",
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "token_count",
+                                    "info": {
+                                        "total_token_usage": {
+                                            "input_tokens": 1000,
+                                            "cached_input_tokens": 100,
+                                            "output_tokens": 50,
+                                            "reasoning_output_tokens": 10,
+                                            "total_tokens": 1050,
+                                        }
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-04-20T19:01:00Z",
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "token_count",
+                                    "info": {
+                                        "total_token_usage": {
+                                            "input_tokens": 1300,
+                                            "cached_input_tokens": 120,
+                                            "output_tokens": 90,
+                                            "reasoning_output_tokens": 25,
+                                            "total_tokens": 1390,
+                                        }
+                                    },
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-04-20T19:02:00Z",
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "token_count",
+                                    "info": {
+                                        "total_token_usage": {
+                                            "input_tokens": 1600,
+                                            "cached_input_tokens": 150,
+                                            "output_tokens": 120,
+                                            "reasoning_output_tokens": 40,
+                                            "total_tokens": 1720,
+                                        }
+                                    },
+                                },
+                            }
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            events = events_from_jsonl(
+                source,
+                project_id="project-a",
+                session_id="session-a",
+                agent_id="primary",
+                model="gpt-5.4-mini",
+                turn_id_prefix="turn",
+                min_captured_at_ms=self._ts_ms("2026-04-20T19:01:30Z"),
+            )
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["tokens"]["input_tokens"], 300)
+            self.assertEqual(events[0]["tokens"]["cached_input_tokens"], 30)
+            self.assertEqual(events[0]["tokens"]["output_tokens"], 30)
+            self.assertEqual(events[0]["tokens"]["reasoning_tokens"], 15)
 
     def test_summary_rolls_up_agents_and_models(self) -> None:
         events = [
@@ -483,6 +569,91 @@ class CodexUsageTrackerTests(unittest.TestCase):
             self.assertEqual(len(rollout_matches), 1)
             self.assertIn(rollout_matches[0]["kind"], {"rollout_jsonl", "token_count_jsonl"})
             self.assertTrue(rollout_matches[0]["importable"])
+
+    def test_events_from_state_sqlite_clips_updated_threads_to_post_cutoff_events(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            rollout = root / "primary-rollout.jsonl"
+            rollout.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": "2026-04-20T19:00:00Z",
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "token_count",
+                                    "info": {"total_token_usage": {"input_tokens": 1000, "cached_input_tokens": 100, "output_tokens": 50, "total_tokens": 1050}},
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-04-20T19:01:00Z",
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "token_count",
+                                    "info": {"total_token_usage": {"input_tokens": 1300, "cached_input_tokens": 120, "output_tokens": 90, "total_tokens": 1390}},
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-04-20T19:02:00Z",
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "token_count",
+                                    "info": {"total_token_usage": {"input_tokens": 1600, "cached_input_tokens": 150, "output_tokens": 120, "total_tokens": 1720}},
+                                },
+                            }
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            sqlite_path = root / "state.sqlite"
+            connection = sqlite3.connect(sqlite_path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE threads (
+                        id TEXT PRIMARY KEY,
+                        rollout_path TEXT NOT NULL,
+                        cwd TEXT NOT NULL,
+                        model TEXT,
+                        agent_nickname TEXT,
+                        agent_role TEXT,
+                        tokens_used INTEGER NOT NULL DEFAULT 0,
+                        created_at_ms INTEGER,
+                        updated_at_ms INTEGER,
+                        archived INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO threads (id, rollout_path, cwd, model, agent_nickname, agent_role, tokens_used, created_at_ms, updated_at_ms, archived)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    ("thread-primary", str(rollout), "/workspace", "gpt-5.4", None, None, 1720, 1, self._ts_ms("2026-04-20T19:02:30Z")),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            events = events_from_state_sqlite(
+                sqlite_path,
+                project_id="project-a",
+                cwd_prefix="/workspace",
+                min_updated_at_ms=self._ts_ms("2026-04-20T19:01:30Z"),
+            )
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["agent_id"], "primary")
+            self.assertEqual(events[0]["tokens"]["input_tokens"], 300)
+            self.assertEqual(events[0]["tokens"]["cached_input_tokens"], 30)
+            self.assertEqual(events[0]["tokens"]["output_tokens"], 30)
 
     def test_events_from_state_sqlite_filters_threads_by_created_time(self) -> None:
         with TemporaryDirectory() as tmpdir:
