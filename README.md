@@ -4,6 +4,13 @@ Project-scoped token accounting and wrapper tooling for Codex sessions.
 
 If you use Codex locally and want to understand the cost shape of real work by project, this repo gives you a local ledger, lightweight workflow wrappers, and a clearer split between project accounting and authoritative quota state.
 
+## Terminology: Shadow Tokens / Shadow Cost
+
+In this repo, "shadow tokens" (sometimes phrased as "shadow cost") means a derived, weighted cost metric computed from token usage plus a local rate card.
+
+- Fresh input, cached input, and output tokens have different weights, so the metric reflects that not all tokens are equally expensive in practice.
+- This is for relative comparisons and steering, not official billing and not an authoritative quota signal.
+
 ## Inspiration
 
 I wanted to make my codex use more token efficient relative to the output I got
