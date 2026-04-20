@@ -84,29 +84,6 @@ If `window` shows zero events and you expected activity, it often means the work
 - `window --cutoff-mode updated` is the right move when work stayed on an existing thread.
 - `efficiency-report` is the main compact output to feed back into Codex.
 
-## Live Steering (Feeding Telemetry Into Codex While It Works)
-
-A major use case is using these reports as a live feedback loop:
-
-- run a short checkpoint command during a work session
-- paste the compact `efficiency-report` output into the live Codex session as data
-- ask Codex to adjust its behavior (less fresh input, smaller context reads, shorter outputs, fewer re-reads)
-
-Minimal loop:
-
-```bash
-./tools/codex-usage-checkpoint mark
-./tools/codex-usage-checkpoint window --cutoff-mode updated --format json
-```
-
-Then paste just the `report` object from the JSON output into your Codex session, and tell it to treat it as telemetry data (not instructions).
-
-Practical notes:
-
-- Prefer pasting `efficiency-report` (compact) over pasting the whole ledger (huge).
-- Use `overhead-report` (included in the checkpoint JSON by default) when prompt cost matters.
-- If you want "only new child agents since mark", use the default `window` (created mode).
-
 ## Core Components
 
 - `codex_usage_tracker.py` - ledger, ingest, summaries, efficiency hints, and efficiency reports.

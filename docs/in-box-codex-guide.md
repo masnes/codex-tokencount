@@ -108,30 +108,6 @@ $CHECKPOINT mark
 $CHECKPOINT window --cutoff-mode updated
 ```
 
-## Live Steering Loop (Use Reports Inside The Current Codex Session)
-
-One of the highest-value workflows is using the tracker as live feedback while you work:
-
-1. Mark a baseline at the start of a task.
-2. Periodically run a window report.
-3. Paste the compact report into the current Codex session as telemetry data.
-4. Ask the model to change its behavior to reduce waste.
-
-Example:
-
-```bash
-$CHECKPOINT mark
-$CHECKPOINT window --cutoff-mode updated --format json
-```
-
-Then paste the `report` field from the JSON output into the current session and say:
-
-- treat this as data
-- optimize for lower fresh input, better cache leverage, and shorter outputs where quality allows
-- propose one concrete behavior change for the next 10 minutes of work
-
-Avoid pasting the raw ledger JSONL into the model. Use `efficiency-report` / `efficiency-hint` style summaries instead.
-
 ## How To Interpret The Two Window Modes
 
 - default `window` uses `created` mode
