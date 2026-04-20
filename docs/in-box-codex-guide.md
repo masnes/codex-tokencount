@@ -161,6 +161,19 @@ For feeding evidence back into the model:
 - prefer `efficiency-report`
 - use `overhead-report` first if prompt cost matters
 
+## Live Steering Loop
+
+If you are in an active Codex session, you can use the tracker as live feedback:
+
+```bash
+$CHECKPOINT mark
+$CHECKPOINT window --cutoff-mode updated --format json
+```
+
+Paste the `report` field from the JSON output into the current session as telemetry data, then ask for one concrete efficiency change for the next 10 minutes (smaller context reads, fewer re-reads, shorter outputs where quality allows).
+
+If you (Codex) have shell access, you can self-steer: run the checkpoint command yourself, read the `report` output as telemetry, and adjust immediately. This avoids relying on a human to run commands or to paste large blobs.
+
 ## If You Also Have The Full Repo
 
 Then these are the next useful context files:

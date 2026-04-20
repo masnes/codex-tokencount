@@ -37,7 +37,20 @@ This repo turns that into a more usable workflow:
 - `snapshot` is the fastest whole-project check.
 - `mark` + `window` is the main "what happened in this slice of work?" flow.
 - `window --cutoff-mode updated` is the right move when work stayed on an existing thread.
-- `efficiency-report` is the main compact output to feed back into Codex.
+- `efficiency-report` is the main compact output to feed back into Codex for live steering.
+
+## Live Steering Loop (Use Telemetry Inside The Current Codex Session)
+
+This is one of the highest-value workflows: generate a compact report during a task, paste it into the running Codex session as telemetry data, and ask it to adjust behavior (smaller reads, fewer re-reads, shorter outputs, better cache leverage).
+
+Minimal loop:
+
+```bash
+./tools/codex-usage-checkpoint mark
+./tools/codex-usage-checkpoint window --cutoff-mode updated --format json
+```
+
+Paste only the `report` field from that JSON into the live session. Avoid pasting the raw ledger JSONL.
 
 ## Core Components
 
