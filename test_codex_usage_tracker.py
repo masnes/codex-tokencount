@@ -159,10 +159,30 @@ class CodexUsageTrackerTests(unittest.TestCase):
                 model="gpt-5.4-mini",
                 usage={"input_tokens": 100, "cached_input_tokens": 10, "output_tokens": 20},
             )
-            append_usage_events(ledger, [event])
+            result = append_usage_events(ledger, [event])
+            self.assertEqual(result["appended"], 1)
+            self.assertEqual(result["skipped_duplicates"], 0)
             loaded = load_usage_events(ledger)
             self.assertEqual(len(loaded), 1)
             self.assertEqual(loaded[0]["project_id"], "project-a")
+
+    def test_append_usage_events_skips_duplicates(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            ledger = Path(tmpdir) / "usage-ledger.jsonl"
+            event = build_usage_event(
+                project_id="project-a",
+                session_id="session-a",
+                agent_id="primary",
+                model="gpt-5.4-mini",
+                usage={"input_tokens": 100, "cached_input_tokens": 10, "output_tokens": 20},
+                captured_at="2026-04-20T19:00:00Z",
+            )
+            first = append_usage_events(ledger, [event])
+            second = append_usage_events(ledger, [event])
+            self.assertEqual(first["appended"], 1)
+            self.assertEqual(second["appended"], 0)
+            self.assertEqual(second["skipped_duplicates"], 1)
+            self.assertEqual(len(load_usage_events(ledger)), 1)
 
     def test_probe_sources_detects_importable_rollout_file(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -322,6 +342,102 @@ class CodexUsageTrackerTests(unittest.TestCase):
             self.assertEqual(len(rollout_matches), 1)
             self.assertIn(rollout_matches[0]["kind"], {"rollout_jsonl", "token_count_jsonl"})
             self.assertTrue(rollout_matches[0]["importable"])
+
+    def test_repeated_state_sqlite_ingest_only_appends_new_events(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            rollout = root / "rollout.jsonl"
+            rollout.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-04-20T19:00:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 1000,
+                                    "cached_input_tokens": 100,
+                                    "output_tokens": 50,
+                                    "total_tokens": 1050,
+                                }
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            sqlite_path = root / "state.sqlite"
+            connection = sqlite3.connect(sqlite_path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE threads (
+                        id TEXT PRIMARY KEY,
+                        rollout_path TEXT NOT NULL,
+                        cwd TEXT NOT NULL,
+                        model TEXT,
+                        agent_nickname TEXT,
+                        agent_role TEXT,
+                        tokens_used INTEGER NOT NULL DEFAULT 0,
+                        created_at_ms INTEGER,
+                        updated_at_ms INTEGER,
+                        archived INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO threads (id, rollout_path, cwd, model, agent_nickname, agent_role, tokens_used, created_at_ms, updated_at_ms, archived)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    ("thread-parent", str(rollout), "/workspace", "gpt-5.4-mini", None, None, 1050, 1, 2),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            ledger = root / "ledger.jsonl"
+
+            first_events = events_from_state_sqlite(sqlite_path, project_id="project-a", cwd_prefix="/workspace")
+            first_result = append_usage_events(ledger, first_events)
+            second_events = events_from_state_sqlite(sqlite_path, project_id="project-a", cwd_prefix="/workspace")
+            second_result = append_usage_events(ledger, second_events)
+
+            self.assertEqual(first_result["appended"], 1)
+            self.assertEqual(second_result["appended"], 0)
+            self.assertEqual(second_result["skipped_duplicates"], 1)
+
+            rollout.write_text(
+                rollout.read_text(encoding="utf-8")
+                + json.dumps(
+                    {
+                        "timestamp": "2026-04-20T19:01:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 1200,
+                                    "cached_input_tokens": 110,
+                                    "output_tokens": 70,
+                                    "total_tokens": 1270,
+                                }
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            third_events = events_from_state_sqlite(sqlite_path, project_id="project-a", cwd_prefix="/workspace")
+            third_result = append_usage_events(ledger, third_events)
+            self.assertEqual(third_result["appended"], 1)
+            self.assertGreaterEqual(third_result["skipped_duplicates"], 1)
+            self.assertEqual(len(load_usage_events(ledger)), 2)
 
 
 if __name__ == "__main__":

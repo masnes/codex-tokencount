@@ -79,6 +79,7 @@ The tracker must support:
 - per-model totals
 - per-phase totals
 - compact `efficiency_hint` output
+- repeated ingestion without double-counting previously imported events
 
 The rollup should calculate:
 - fresh-input share of shadow credits
@@ -137,6 +138,11 @@ Current canonical entrypoints:
 - `python codex_usage_tracker.py efficiency-hint ...`
 - `python codex_usage_tracker.py probe-sources ...`
 - `./tools/codex-usage ...`
+
+Repeated import commands should report:
+- source event count
+- appended count
+- skipped duplicate count
 
 ## Archive boundary
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sqlite3
@@ -208,6 +209,29 @@ def shadow_credits_for_usage(
     }
 
 
+def _event_identity_payload(event: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": event.get("kind"),
+        "project_id": event.get("project_id"),
+        "session_id": event.get("session_id"),
+        "agent_id": event.get("agent_id"),
+        "parent_agent_id": event.get("parent_agent_id"),
+        "phase": event.get("phase"),
+        "turn_id": event.get("turn_id"),
+        "model": event.get("model"),
+        "source": event.get("source"),
+        "source_path": event.get("source_path"),
+        "ts": event.get("ts"),
+        "tokens": event.get("tokens"),
+    }
+
+
+def event_id_for_event(event: Mapping[str, Any]) -> str:
+    payload = _event_identity_payload(event)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
 def build_usage_event(
     *,
     project_id: str,
@@ -243,7 +267,9 @@ def build_usage_event(
         "source_path": source_path,
         "confidence": confidence,
     }
-    return {key: value for key, value in event.items() if value is not None}
+    compact = {key: value for key, value in event.items() if value is not None}
+    compact["event_id"] = event_id_for_event(compact)
+    return compact
 
 
 def _extract_usage_payload(record: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -669,12 +695,42 @@ def events_from_jsonl(
 
 
 def load_usage_events(path: Path) -> list[dict[str, Any]]:
-    return [record for record in _load_jsonl(path) if record.get("kind") == "usage_delta"]
+    records = [record for record in _load_jsonl(path) if record.get("kind") == "usage_delta"]
+    for record in records:
+        if not _coerce_str(record.get("event_id")):
+            record["event_id"] = event_id_for_event(record)
+    return records
 
 
-def append_usage_events(path: Path, events: Sequence[dict[str, Any]]) -> None:
-    if events:
-        _append_jsonl(path, events)
+def append_usage_events(path: Path, events: Sequence[dict[str, Any]]) -> dict[str, int]:
+    prepared: list[dict[str, Any]] = []
+    for event in events:
+        record = dict(event)
+        if not _coerce_str(record.get("event_id")):
+            record["event_id"] = event_id_for_event(record)
+        prepared.append(record)
+
+    existing_ids = {
+        _coerce_str(record.get("event_id"))
+        for record in load_usage_events(path)
+        if _coerce_str(record.get("event_id"))
+    }
+    unique_events: list[dict[str, Any]] = []
+    skipped_duplicates = 0
+    seen_new_ids: set[str] = set()
+    for event in prepared:
+        event_id = _coerce_str(event.get("event_id"))
+        if event_id is None:
+            continue
+        if event_id in existing_ids or event_id in seen_new_ids:
+            skipped_duplicates += 1
+            continue
+        seen_new_ids.add(event_id)
+        unique_events.append(event)
+
+    if unique_events:
+        _append_jsonl(path, unique_events)
+    return {"appended": len(unique_events), "skipped_duplicates": skipped_duplicates}
 
 
 def summarize_usage_events(
@@ -930,8 +986,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "reasoning_output_tokens": args.reasoning_tokens,
             },
         )
-        append_usage_events(ledger, [event])
-        print(json.dumps(event, indent=2, sort_keys=True))
+        result = append_usage_events(ledger, [event])
+        print(json.dumps({"event": event, **result}, indent=2, sort_keys=True))
         return 0
 
     if args.command == "ingest-jsonl":
@@ -947,8 +1003,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             phase=args.phase,
             turn_id_prefix=args.turn_id_prefix,
         )
-        append_usage_events(ledger, events)
-        print(json.dumps({"event_count": len(events), "ledger": str(ledger), "source_file": str(source_file)}, indent=2, sort_keys=True))
+        result = append_usage_events(ledger, events)
+        print(json.dumps({"event_count": len(events), "ledger": str(ledger), "source_file": str(source_file), **result}, indent=2, sort_keys=True))
         return 0
 
     if args.command == "summary":
@@ -970,12 +1026,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             default_model=args.default_model,
             max_threads=args.max_threads,
         )
-        append_usage_events(ledger, events)
+        result = append_usage_events(ledger, events)
         session_ids = sorted({event["session_id"] for event in events if _coerce_str(event.get("session_id"))})
         print(
             json.dumps(
                 {
                     "event_count": len(events),
+                    **result,
                     "ledger": str(ledger),
                     "project_id": args.project_id,
                     "session_count": len(session_ids),

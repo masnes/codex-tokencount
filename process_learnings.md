@@ -7,6 +7,7 @@
 - Archive the old spike before replacing it. The evidence trail is worth keeping even when the core design direction changes.
 - If the new system depends on local telemetry that may drift, design around source classes and confidence levels instead of hardcoding one file path as if it were guaranteed.
 - Keep live feedback tiny. A large observability payload can easily become its own inefficiency tax.
+- Dogfood the ledger under repeated imports before trusting it. A tracker that doubles history on the second ingest is worse than no tracker because it looks precise while lying.
 
 ## 2026-04-15
 
