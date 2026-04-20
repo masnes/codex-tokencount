@@ -1,0 +1,59 @@
+  Read and understand the full workspace context before doing any task work. Start with AGENTS.md, HANDOFF.md, user_model.json,
+  codex_budget_policy.md, README.md, START_HERE_PROMPT.txt, docs/startup-manifest.md, and docs/codex-box.md. Then read tools/codex-box,
+  codex_governor_interface_spec.md, codex_governor_build_vs_borrow.md, codex_governor.py, test_codex_governor_spike.py, and sources.md. Use
+  git status and git diff to identify the current canonical working set, then inspect any changed files that appear relevant. Use additional
+  targeted reads only if needed to resolve uncertainty.
+
+  Meta objective:
+  Maximize the expected value of future Codex work per token. Prefer changes that improve launch reliability, auditability, startup cost,
+  budget control, and the quality of future iterations. Avoid rediscovering the same context repeatedly. Treat full-workspace rereads as
+  expensive bootstrap/audit operations, not default behavior.
+
+  Keep the run productive for the full hour. Stay within 23% of the estimated five-hour budget. Do not stop after the first acceptable result.
+  Use the full hour unless we are truly satisficed. "Satisficed" means the current result is good enough under the constraints, and there is
+  no clearly better next move worth the extra cost right now.
+
+  Working loop:
+  - pick the highest-value remaining task,
+  - execute it,
+  - test it,
+  - inspect the result,
+  - decide whether it is actually good enough,
+  - pivot if a better task emerged,
+  - and repeat until satisficed or the hour/budget window ends.
+
+  Task priorities:
+  - Make one durable git-backed improvement per cycle when possible.
+  - Prefer changes that increase audit fidelity, especially evidence of actual text changes.
+  - Before ending a cycle, inspect `git diff --stat` and `git diff` so the run can explain what changed in text, not just that something ran.
+  - If the run reveals that a follow-up launch would help and the recursion sub-budget is available, prefer using that path instead of doing a host relaunch.
+  - If the recursion sub-budget is exhausted, queue the next improvement inside this same prompt instead of relaunching the host.
+  - If there is a meaningful diff, stage, `git add`, and commit the code to git before stopping.
+  - If there is no meaningful diff, explain why and leave the tree unchanged.
+
+  Use git as the working state tool:
+  - inspect with git status and git diff,
+  - keep changes small and auditable,
+  - checkpoint before risky edits if needed,
+  - and do not make broad untracked rewrites.
+
+  Decision rule:
+  - Prefer the task with the highest expected value for the workspace as a whole.
+  - If several tasks compete, choose the one that most improves future productivity, auditability, or launch reliability.
+  - If a change reveals a better follow-up, pivot immediately.
+  - Keep iterating until the marginal value of another cycle is lower than its cost.
+
+  Operating style:
+  - Make small, auditable changes.
+  - Test any code change before moving on.
+  - Re-evaluate priorities after each cycle.
+  - Optimize for the best final state, not for getting to "done" quickly.
+  - You are more token constrained than time constrained, so trade time for token use and be economical in general with tokens.
+  - Prefer carrying follow-up work forward in the prompt over relaunching the launcher unless the new session state is genuinely needed.
+
+  Task:
+  Improve the Codex governor / hour-run workflow for future long runs. Choose the highest-value remaining issue from the live repo state, make
+  a small auditable git-backed change, verify it, and then keep iterating on the next-best follow-up. Prioritize improving audit capture of
+  text changes and the ability to continue work via the recursion sub-budget without a relaunch. Use the full hour unless truly satisficed.
+  If a better follow-up appears, pivot to it. Continue until the work is genuinely good enough or the hour/budget ends, then commit the code
+  to git.

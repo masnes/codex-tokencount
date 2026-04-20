@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  ./tools/codex-box [--box NAME] [--workspace-label shared|private|disable] [PROJECT_DIR]
+
+Examples:
+  ./tools/codex-box --box planner
+  ./tools/codex-box --box reviewer .
+  ./tools/codex-box --box fixup ~/src/myrepo
+  ./tools/codex-box --workspace-label disable --box rescue ~/src/myrepo
+
+Notes:
+  - PROJECT_DIR defaults to the current working directory.
+  - Give each concurrent box a different --box name.
+  - Re-running the same box name in the same project resumes the same container.
+  - Use --workspace-label private or disable only if a host-specific permission issue forces it.
+  - You can also set CODEX_BOX_WORKSPACE_LABEL=shared|private|disable.
+USAGE
+}
+
+slugify() {
+  local s="$1"
+  s="${s,,}"
+  s="${s//[^a-z0-9._-]/-}"
+  s="${s#-}"
+  s="${s%-}"
+  while [[ "$s" == *--* ]]; do s="${s//--/-}"; done
+  [[ -n "$s" ]] || s="box"
+  printf '%s' "$s"
+}
+
+box_name=""
+workspace_label=""
+proj=""
+
+while (($#)); do
+  case "$1" in
+    --box)
+      [[ $# -ge 2 ]] || { echo "--box requires a value" >&2; usage; exit 2; }
+      box_name="$2"
+      shift 2
+      ;;
+    --workspace-label)
+      [[ $# -ge 2 ]] || { echo "--workspace-label requires a value" >&2; usage; exit 2; }
+      workspace_label="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      if [[ -n "$proj" ]]; then
+        echo "Only one project path may be provided." >&2
+        usage
+        exit 2
+      fi
+      proj="$1"
+      shift
+      ;;
+  esac
+done
+
+if (($#)); then
+  echo "Unexpected extra arguments: $*" >&2
+  usage
+  exit 2
+fi
+
+workspace_label="${workspace_label:-${CODEX_BOX_WORKSPACE_LABEL:-shared}}"
+case "$workspace_label" in
+  shared|private|disable)
+    ;;
+  *)
+    echo "Invalid workspace label mode: $workspace_label" >&2
+    echo "Expected one of: shared, private, disable" >&2
+    exit 2
+    ;;
+esac
+
+proj="${proj:-$PWD}"
+proj="$(realpath "$proj")"
+
+if [[ ! -d "$proj" ]]; then
+  echo "Project path is not a directory: $proj" >&2
+  exit 1
+fi
+
+if [[ "$proj" == "$HOME" ]]; then
+  echo "Refusing to mount your entire home directory." >&2
+  exit 1
+fi
+
+workspace_mount="type=bind,src=$proj,dst=/workspace,bind-propagation=rprivate,bind-nonrecursive=true"
+workspace_security_opt=()
+case "$workspace_label" in
+  shared|private)
+    workspace_mount="$workspace_mount,relabel=$workspace_label"
+    ;;
+  disable)
+    workspace_security_opt+=(--security-opt=label=disable)
+    ;;
+esac
+
+if ! command -v podman >/dev/null 2>&1; then
+  echo "podman is not installed or not in PATH." >&2
+  exit 1
+fi
+
+if ! git -C "$proj" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "WARNING: $proj does not appear to be inside a git work tree." >&2
+fi
+
+if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -d "${XDG_RUNTIME_DIR:-}" ]]; then
+  echo "WARNING: XDG_RUNTIME_DIR is missing. Rootless Podman may fail outside a normal login session." >&2
+  echo "         On Fedora this is usually /run/user/$(id -u)." >&2
+fi
+
+for f in /usr/share/containers/mounts.conf /etc/containers/mounts.conf "$HOME/.config/containers/mounts.conf"; do
+  if [[ -s "$f" ]]; then
+    echo "WARNING: $f is non-empty." >&2
+    echo "         Podman may auto-mount extra host paths into containers." >&2
+    echo "         Inspect that file if you want strict 'only this bind dir' behavior." >&2
+  fi
+done
+
+project_slug="$(slugify "$(basename "$proj")")"
+box_name="${box_name:-box}"
+box_slug="$(slugify "$box_name")"
+project_id="$(printf '%s' "$proj" | sha256sum | cut -c1-12)"
+container_name="codex-box-${project_slug}-${box_slug}-${project_id}"
+box_home_volume="codex-home-${project_id}-${box_slug}"
+shared_auth_volume="codex-auth"
+
+container_state=""
+if podman container inspect "$container_name" >/dev/null 2>&1; then
+  container_state="$(podman container inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)"
+  if [[ "$container_state" == "running" ]]; then
+    echo "Resuming live container: $container_name" >&2
+    echo "Second shell: podman exec -it $container_name bash" >&2
+    exec podman exec -it "$container_name" bash
+  fi
+  echo "Starting existing container: $container_name" >&2
+  echo "Second shell after it starts: podman exec -it $container_name bash" >&2
+  exec podman start -ai "$container_name"
+fi
+
+podman volume inspect "$shared_auth_volume" >/dev/null 2>&1 || podman volume create "$shared_auth_volume" >/dev/null
+podman volume inspect "$box_home_volume" >/dev/null 2>&1 || podman volume create "$box_home_volume" >/dev/null
+
+exec podman run -it \
+  --name "$container_name" \
+  --hostname "$container_name" \
+  --label com.openai.codex.box="$box_slug" \
+  --label com.openai.codex.project="$project_slug" \
+  --security-opt=no-new-privileges \
+  "${workspace_security_opt[@]}" \
+  --image-volume=ignore \
+  --http-proxy=false \
+  --pids-limit=512 \
+  --network=slirp4netns:allow_host_loopback=false \
+  --no-hosts \
+  --dns=1.1.1.1 \
+  --dns=9.9.9.9 \
+  --dns-search=. \
+  --mount type=volume,src="$shared_auth_volume",dst=/codex-auth \
+  --mount type=volume,src="$box_home_volume",dst=/codex-home \
+  --mount "$workspace_mount" \
+  -e CODEX_ASSUME_EXTERNAL_SANDBOX=1 \
+  -e HOME=/root \
+  -e CODEX_BOX_NAME="$box_slug" \
+  -e CODEX_PROJECT_NAME="$project_slug" \
+  -e CODEX_BOX_WORKSPACE_LABEL="$workspace_label" \
+  -e CODEX_OUT="/workspace/_codex_out/$box_slug" \
+  -w /workspace \
+  localhost/codex-box \
+  bash -lc '
+    export CODEX_HOME="/codex-home"
+    live_budget_policy="$CODEX_HOME/codex_budget_policy.live.md"
+    mkdir -p "$CODEX_HOME" /codex-auth /workspace/_codex_out "$CODEX_OUT"
+
+    if [[ -f /workspace/codex_budget_policy.md && ! -e "$live_budget_policy" ]]; then
+      cp /workspace/codex_budget_policy.md "$live_budget_policy"
+    fi
+
+    ln -snf /codex-auth/auth.json "$CODEX_HOME/auth.json"
+
+    if [[ ! -f "$CODEX_HOME/config.toml" ]]; then
+      cat > "$CODEX_HOME/config.toml" <<CFG
+approval_policy = "on-request"
+sandbox_mode = "danger-full-access"
+cli_auth_credentials_store = "file"
+web_search = "cached"
+model = "gpt-5.4-mini"
+model_reasoning_effort = "xhigh"
+CFG
+    fi
+
+    echo
+    echo "Inside $HOSTNAME."
+    echo "Workspace: /workspace"
+    echo "Codex home: $CODEX_HOME"
+    echo "Shared auth store: /codex-auth/auth.json"
+    echo "Live budget snapshot: $live_budget_policy"
+    echo "Workspace label mode: ${CODEX_BOX_WORKSPACE_LABEL:-unknown}"
+    if [[ "${CODEX_BOX_WORKSPACE_LABEL:-shared}" == disable ]]; then
+      echo "Warning: SELinux workspace labeling is disabled for this container."
+    fi
+    echo "Box name: ${CODEX_BOX_NAME:-unknown}"
+    echo "Box output dir: $CODEX_OUT"
+    echo
+    if [[ ! -s /codex-auth/auth.json ]]; then
+      echo "First-time login in any box:"
+      echo "  codex login --device-auth"
+      echo
+    fi
+    echo "Then start Codex:"
+    echo "  codex"
+    echo
+    echo "Second shell in this live container:"
+    echo "  podman exec -it $HOSTNAME bash"
+    echo
+    echo "Notes:"
+    echo "  - This box has its own CODEX_HOME/state volume, so concurrent boxes do not trample each others logs/history/cache."
+    echo "  - Auth is shared through /codex-auth/auth.json so you should not need to log in separately for every box."
+    echo "  - The workspace bind mount defaults to shared SELinux relabeling so multiple containers can share the same project directory safely."
+    echo "  - private is available if you want a stricter one-box mount label; disable is the escape hatch when a host-specific SELinux issue blocks startup."
+    echo "  - Codex defaults to gpt-5.4-mini with xhigh reasoning in new boxes unless you override the config."
+    echo "  - CODEX_ASSUME_EXTERNAL_SANDBOX=1 is set so governor-launched Codex can skip its nested sandbox inside this Podman box."
+    echo "  - Re-running ./tools/codex-box with the same --box value in the same project resumes this container instead of creating a new one."
+    echo "  - The live budget policy snapshot stays at $live_budget_policy until you deliberately replace it."
+    echo "  - Codex can write directly to /workspace and those files appear on the host."
+    echo "  - Package installs inside the running container are allowed, but they stay only as long as this container exists."
+    echo "  - Use $CODEX_OUT for clean per-box handoff files."
+    echo
+    exec bash
+  '
