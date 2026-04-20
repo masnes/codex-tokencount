@@ -5,16 +5,17 @@ Before doing anything substantial:
 2. Read `HANDOFF.md`.
 3. Read `user_model.json`.
 4. Read `codex_budget_policy.md`.
-5. If you want the compact bootstrap path, read `docs/startup-manifest.md`.
-6. If you want the recurring process lessons from recent runs, read `process_learnings.md`.
-7. If you want the full-context hour-task path, use `tools/codex-hour-run` instead of starting from the compact manifest.
-8. Summarize your current model of Michael, your operating rules, and the active workstreams in 8-12 bullets.
-9. State any uncertainties as hypotheses rather than flattening them.
-10. Only then continue the task.
+5. Read `codex_usage_tracker_spec.md`.
+6. If you want the compact bootstrap path, read `docs/startup-manifest.md`.
+7. If you want the recurring process lessons from recent runs, read `process_learnings.md`.
+8. Treat `archive/governor-spike-20260420/` as historical context only; the live implementation is the usage tracker.
+9. Summarize your current model of Michael, your operating rules, and the active workstreams in 8-12 bullets.
+10. State any uncertainties as hypotheses rather than flattening them.
+11. Only then continue the task.
 
 Task continuation rule:
 - Match Michael's actual objective, not the locally easiest interpretation.
 - Keep decision burden low.
 - Preserve anti-anchoring where uncertainty is real.
 - For infra/system work: read first, plan briefly, then make small auditable diffs.
-- If budget mode is constrained, obey `codex_budget_policy.md` over your default exploratory behavior.
+- Prefer project-scoped token observability and shadow-credit summaries over hard throttles.

@@ -45,7 +45,7 @@
     "artifact_hygiene": "one canonical target per deliverable unless explicitly branching"
   },
   "active_workstreams": [
-    "Codex self-limiting / quota-aware governor design",
+    "Codex project-scoped token observability / efficiency design",
     "Security-conscious Codex box setup",
     "Reading recommendation mining / prose-fit filtering",
     "Wardrobe / style / color analysis project",

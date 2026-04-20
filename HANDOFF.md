@@ -41,33 +41,36 @@ Use these when the space is genuinely uncertain or identity-relevant:
 ## Current active interests / workstreams
 ### 1) Codex / agent workflow design
 This is active right now.
-Michael is exploring how to make Codex self-limit based on remaining quota so it makes better decisions under budget constraints.
+Michael is exploring how to give Codex accurate project-scoped token information so it can steer toward better net token efficiency.
 
 Current best synthesis:
-- Do NOT rely on Codex to introspect quota inside the live session and self-regulate from vibes.
-- Instead, use an external governor/wrapper as source of truth.
-- If `/status` is available, ingest it; otherwise derive live budget state from `/codex-home/state_5.sqlite` plus the active rollout JSONL `token_count` events.
-- Feed a compact budget state back into Codex on each turn.
-- Change allowed behavior by mode (`normal`, `constrained`, `emergency`).
-- Reserve a separate agent slice by default, roughly 10% of the estimated five-hour allowance, for autonomous runs.
-- Prefer `gpt-5.4-mini` for exploratory, bounded, or cheap tasks; escalate only when quality genuinely matters.
-- Token control comes more from context discipline and bounded loops than from a pretty meter.
+- Do NOT rely on Codex to infer efficiency from vibes or from a single remaining-quota number.
+- Treat remaining-limit surfaces and project accounting as separate problems.
+- Stay on ChatGPT-backed Codex Pro by default; do not route ordinary local work through the paid API just to get usage objects.
+- Build a local ledger around wrapper metadata plus whatever Codex telemetry is available.
+- Track `project_id`, `session_id`, `agent_id`, `parent_agent_id`, `phase`, `turn_id`, and `model`.
+- Count fresh input, cached input, and output separately.
+- Use the local rate card as a shadow-price system so the tracker reflects real efficiency pressure.
+- Feed back only a compact `efficiency_hint`, not a hard throttle.
+- Prefer `gpt-5.4-mini` for exploratory or bounded work when quality loss is acceptable; escalate only when expected value justifies it.
+- Token efficiency comes mostly from context discipline, cache-friendly continuation, and avoiding expensive output, not from quota theater.
 
 Recommended implementation shape:
-- Wrapper reads `/status` externally when possible, otherwise uses the local session telemetry files.
-- Wrapper tracks per-turn usage from `codex exec --json` logs and the rollout JSONL stream.
-- Wrapper injects budget state into Codex via prompt or hooks, and should derive the interactive policy plus the child-agent slice from the same usage snapshot. In code, prefer a single `resolve_with_budget_plan(...)` call when you need both.
-- For child work, materialize the snapshot to disk, launch a bounded `codex exec` child with that snapshot, then refresh the snapshot after the run if it passed tests.
-- Recursive launcher calls are gated by a one-step recursion sub-budget; child runs carry depth metadata and nested launcher invocations must fail closed when the sub-budget is absent or exhausted.
-- Hook / wrapper enforces behavior changes: no subagents, no broad scans, no giant context ingestion in constrained mode.
-- For launcher runs inside `tools/codex-box`, the intended defaults are `CODEX_ASSUME_EXTERNAL_SANDBOX=1`, `model = "gpt-5.4-mini"`, and `model_reasoning_effort = "xhigh"` in a fresh box config.
+- Wrapper emits local `usage_delta` events keyed by project and agent identity.
+- Tracker converts explicit usage payloads or cumulative `token_count` telemetry into those events.
+- Tracker computes per-project, per-agent, per-model, and per-phase rollups plus a small waste label.
+- Shadow credits are charged separately for fresh input, cached input, and output; reasoning tokens remain diagnostic only.
+- Child-agent usage should roll up under both the child and the parent relationship so delegation tax is visible.
+- The injected feedback block should stay tiny enough that it does not meaningfully worsen the problem it is trying to solve.
+- Remaining-limit reads such as `/status` are still useful operationally, but they are not the main design surface for the tracker.
+- The previous governor spike is archived under `archive/governor-spike-20260420/` and should be treated as prior art, not the current direction.
 
 ### 2) Security-conscious Codex box setup
 Michael wants strong containment against container escape and accidental damage outside the handoff boundary, while keeping enough write access for productive work inside the box.
 - He is less worried about the container being destroyed than about it affecting the host outside its allowed boundary.
 - He values explicit threat-model tradeoffs.
 - He wants practical, not theatrical, security.
-- The Podman shim lives in `tools/codex-box`; its operational notes are in `docs/codex-box.md` so the compatibility layer stays separate from the governor code.
+- The Podman shim lives in `tools/codex-box`; its operational notes are in `docs/codex-box.md` so the compatibility layer stays separate from the usage-tracker code.
 
 ### 3) Reading / story recommendation work
 Durable taste signals:
@@ -132,4 +135,4 @@ High-confidence summary:
 - Letting elegant theory substitute for actual progress.
 
 ## Suggested first action when using this package
-Read `AGENTS.md`, then `user_model.json`, then `codex_budget_policy.md`. Summarize your model of Michael in 8-12 bullets before taking any substantial action.
+Read `AGENTS.md`, then `user_model.json`, then `codex_usage_tracker_spec.md`, then `codex_budget_policy.md`. Summarize your model of Michael in 8-12 bullets before taking any substantial action.

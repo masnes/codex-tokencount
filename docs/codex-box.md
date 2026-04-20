@@ -1,6 +1,6 @@
 # codex-box shim
 
-`tools/codex-box` is a compatibility wrapper around Podman, not part of the governor core. It exists to give a strong default sandbox for one or more boxes that share the same workspace directory.
+`tools/codex-box` is a compatibility wrapper around Podman, not part of the usage-tracker core. It exists to give a strong default sandbox for one or more boxes that share the same workspace directory.
 
 ## Location
 
@@ -42,9 +42,9 @@ The wrapper still keeps other guardrails in place:
 - `--http-proxy=false`
 - `--no-hosts`
 - `--pids-limit=512`
-- Sets `CODEX_ASSUME_EXTERNAL_SANDBOX=1` so governor-launched Codex can bypass Codex's nested sandbox and treat the Podman box as the outer boundary.
+- Sets `CODEX_ASSUME_EXTERNAL_SANDBOX=1` so wrapper-launched Codex can bypass Codex's nested sandbox and treat the Podman box as the outer boundary.
 - Seeds new boxes with `model = "gpt-5.4-mini"` and `model_reasoning_effort = "xhigh"` in `~/.codex/config.toml`.
 
 ## Why it is separate
 
-The wrapper is host and container integration glue. It is useful, but it is not the same layer as the Python governor, the budget policy, or the repo-local launch logic. Keeping it in `tools/` makes the split obvious and reduces the chance that the shim gets treated like core workflow code.
+The wrapper is host and container integration glue. It is useful, but it is not the same layer as the Python usage tracker, the budget policy, or the repo-local launch logic. Keeping it in `tools/` makes the split obvious and reduces the chance that the shim gets treated like core workflow code.

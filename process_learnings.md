@@ -1,4 +1,14 @@
-# Process Learnings — 2026-04-15
+# Process Learnings
+
+## 2026-04-20
+- Split "remaining subscription headroom" from "project token accounting." They are different control problems and get worse when forced into one abstraction.
+- A useful efficiency system does not need a hard throttle first. It needs trustworthy attribution, a stable ledger, and a compact summary that can change behavior.
+- Shadow pricing is more decision-relevant than raw token counts when cached input is much cheaper than fresh input and output is much more expensive than input.
+- Archive the old spike before replacing it. The evidence trail is worth keeping even when the core design direction changes.
+- If the new system depends on local telemetry that may drift, design around source classes and confidence levels instead of hardcoding one file path as if it were guaranteed.
+- Keep live feedback tiny. A large observability payload can easily become its own inefficiency tax.
+
+## 2026-04-15
 
 ## This Run
 - Split the hour-task path into two layers: a quiet launcher and a watch wrapper. The launcher should stay minimal; observability belongs in the watcher.

@@ -1,92 +1,119 @@
 # codex_budget_policy.md
 
-Purpose: make Codex behave well under remaining-token / remaining-window constraints.
+Purpose: give Codex accurate project-scoped token information so it can improve net token efficiency without depending on the paid API or a hard throttle.
 
 ## Core principle
-Do not ask Codex to "be careful with tokens" in a vague way.
-Use an external governor and force specific behavior changes by budget mode.
+Do not reduce this problem to "tokens left" or a mode switch.
+
+The useful control loop is:
+1. observe where this project spent tokens
+2. price those tokens with the local rate card
+3. derive a small efficiency summary
+4. feed back only the parts likely to change behavior
+
+Remaining subscription headroom and project-scoped usage accounting are separate concerns.
 
 ## Source of truth
-- External wrapper / governor reads `codex /status` if available.
-- If `/status` is unavailable, use `/codex-home/state_5.sqlite` plus the active rollout JSONL `token_count` events as the live telemetry source.
-- External wrapper also records actual per-turn burn from `codex exec --json` or the rollout stream.
-- In-session status is advisory only.
+- Use local Codex telemetry and wrapper metadata for project accounting.
+- Treat wrapper metadata as explicit attribution fields: `project_id`, `session_id`, `agent_id`, `parent_agent_id`, `phase`, `turn_id`, `model`.
+- When available, ingest explicit per-turn usage payloads with `input_tokens`, `cached_input_tokens`, and `output_tokens`.
+- When only cumulative local telemetry exists, derive deltas and persist them as local `usage_delta` events.
+- Treat `/status`, dashboards, and similar remaining-limit surfaces as operational context, not the core project ledger.
 
-## Budget modes
-### Mode: normal
-Use when remaining budget is comfortably above risk threshold.
-Allowed:
-- regular scoped exploration
-- targeted repo reading
-- ordinary edits and tests
-Avoid:
-- gratuitous broad scans
-- giant pasted context blobs
+## What to measure
+Track these token categories separately:
+- fresh input
+- cached input
+- output
+- reasoning tokens as diagnostic only
 
-### Mode: constrained
-Use when budget is meaningfully limited.
-Rules:
-- no subagents
-- no repo-wide scans without explicit justification
-- no reading large files unless likely relevant
-- prefer `gpt-5.4-mini`
-- summarize before editing
-- max 3 candidate files before asking/stopping
-- prefer plan-only if the task is ambiguous
+Track these attribution dimensions separately:
+- project
+- session
+- agent
+- parent agent
+- phase
+- model
 
-### Mode: emergency
-Use when close to depletion or near reset boundary with risk of waste.
-Rules:
-- plan only, or one small bounded action
-- no exploratory tests
-- no broad search
-- no subagents
-- no large context ingestion
-- stop after one decisive diff / answer unless explicitly authorized to continue
+Why this split matters:
+- cached input is much cheaper than fresh input under the local rate card
+- output is materially more expensive than input
+- reasoning tokens explain behavior but should not be charged twice
 
-## Behavioral throttles
-When budget gets tighter, reduce in this order:
-1. breadth of search
-2. amount of context loaded
-3. number of candidate approaches explored
-4. model size / reasoning level
-5. total actions taken
+## Shadow pricing
+Use the user-provided local rate card as a shadow-price system.
 
-## Wrapper-injected context block
+Default assumption:
+- the rate card denominator is per 1,000,000 tokens unless the user changes it
+
+Charging model:
+- `fresh_input_tokens * input_rate`
+- `cached_input_tokens * cached_input_rate`
+- `output_tokens * output_rate`
+- `reasoning_tokens` are reported but not charged separately
+
+This is for efficiency steering, not invoice replication.
+
+## Efficiency signals
+The tracker should produce rollups for:
+- total shadow credits by project
+- credits by agent
+- credits by model
+- credits by phase
+- fresh-input share
+- cached-input share
+- output share
+- child-agent share
+
+Initial waste labels:
+- `delegation_heavy`
+- `output_heavy`
+- `low_cache_leverage`
+- `none`
+
+These labels are heuristics. Their job is to redirect attention, not prove guilt.
+
+## Feedback shape
+Inject a compact summary, not a giant ledger dump.
+
 Example:
 
-```text
-Budget mode: constrained
-5h remaining: LOW
-weekly remaining: MEDIUM
-Last run usage: input=18200 cached=7400 output=2100
-Policy: no subagents; no repo-wide scans; prefer targeted grep/read; use gpt-5.4-mini unless final synthesis; stop after a plan or one bounded diff.
+```json
+{
+  "efficiency_hint": {
+    "project_credits": 812.4,
+    "fresh_input_share": 0.58,
+    "output_share": 0.31,
+    "child_agent_share": 0.24,
+    "top_waste": "low_cache_leverage",
+    "top_agent": "primary",
+    "top_agent_credits": 403.8
+  }
+}
 ```
 
-## Enforcement ideas
-- On each turn, prepend the budget block.
-- Reject prompts that would obviously violate mode policy.
-- Refuse subagent spawning in constrained/emergency mode.
-- Maintain a small rolling history file with actual burn per run.
+Use this to bias behavior toward:
+- targeted reads over repeated broad reads
+- terse output over narrative output
+- cache-friendly continuation over restart-heavy workflows
+- delegation only when expected value beats summary and coordination cost
 
 ## What not to do
-- Do not rely on Codex to infer budget from vibes.
-- Do not dump giant memory blobs into every run.
-- Do not keep a long autonomous session alive when one-turn loops would do.
+- Do not make the system depend on paid API traffic for ordinary local work.
+- Do not inject raw telemetry streams into Codex.
+- Do not collapse project accounting into a single "remaining tokens" number.
+- Do not treat remaining-limit telemetry as if it were a project ledger.
+- Do not make the feedback block large enough to become its own cost center.
 
-## Good budget-aware defaults
-- Small `AGENTS.md`.
-- Richer docs stored separately and loaded only when needed.
-- Prefer bounded `codex exec` loops over open-ended sessions when cost control matters.
-- Escalate to larger model / more reasoning only when the expected value is clearly positive.
-- For autonomous agents, reserve a fixed slice of the estimated five-hour allowance and stop the child session at that slice limit.
-- Use one live usage snapshot to decide both the current turn policy and the child-agent slice so the numbers do not drift between reads.
-- When launching a child agent, write the snapshot first, use it as the prompt policy block, then refresh the snapshot after the run.
-- Recursive launcher calls are only allowed when the current process carries a nonzero recursion sub-budget; otherwise fail closed.
+## Good operating defaults
+- Keep `AGENTS.md` compact and push richer docs into separate files.
+- Prefer one canonical wrapper so agent attribution stays clean.
+- Persist local `usage_delta` events to JSONL so summaries are reproducible.
+- Record unpriced or low-confidence events explicitly instead of pretending they are exact.
+- Use the cheapest source that materially changes the next decision.
 
 ## Bootstrap / startup reads
-- Treat "read the workspace into context, then summarize" as a bootstrap or audit operation, not the default launcher path.
-- A measured full-intake run can consume a large fixed cost even when the result is just a summary; avoid repeating it casually.
-- Prefer `docs/startup-manifest.md` for the compact bootstrap path when you just need orientation.
-- Use `tools/codex-hour-watch` as the canonical full-context hour-task wrapper when you want live audit streaming; use `tools/codex-hour-run` for the quieter variant. Both read the full workspace context, cap the child at 23% of the estimated five-hour allowance, and permit one nested continuation only when a recursion sub-budget is present.
-- If you do a bootstrap read, keep it to one pass, produce one concise summary, and record the token cost so the lesson becomes reusable, ideally in `process_learnings.md`.
+- Treat "read the whole workspace and summarize it" as a measurable bootstrap cost, not the default path.
+- Prefer `docs/startup-manifest.md` for cheap orientation, then move to targeted reads.
+- If you do a large bootstrap read, record the resulting token cost in the local ledger and preserve the lesson in `process_learnings.md`.
+- Archive old control experiments before replacing them so the repo can evolve without losing the prior evidence trail.
