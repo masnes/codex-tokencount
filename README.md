@@ -58,7 +58,7 @@ Before acting on a model suggestion based on this telemetry, it should explicitl
 - Mechanism: why this reduces waste (smaller context reads, fewer re-reads, shorter outputs, better cache leverage).
 - Failure mode: ways it could backfire (missing dependency, hidden coupling, quality drop). I like having it list failure modes by expected value (probability or uncertainty x blast radius)
 
-## Quickstart
+## Quick Overview
 
 - `tools/codex-usage-checkpoint` is the main operator entrypoint.
 - `snapshot` is the fastest whole-project check.
@@ -98,7 +98,7 @@ Paste the `report` object and ask something like:
 - `tools/codex-box` - Podman shim for a constrained Codex box. (old WIP, I might post this as a separate repo soon)
 - `archive/governor-spike-20260420/` - archived quota-governor spike retained as historical context.
 
-## Fast Start
+## Quickstart
 
 1. Inspect the CLI surface.
 
